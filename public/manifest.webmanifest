@@ -1,0 +1,11 @@
+{
+  "name": "The Hunza Sizzle",
+  "short_name": "Hunza Sizzle",
+  "description": "Chinese & Fast Food, Islamabad — order online, pickup or curbside.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#141110",
+  "theme_color": "#141110",
+  "orientation": "portrait-primary",
+  "icons": []
+}
