@@ -72,4 +72,3 @@ open the app on any phone.
 
 For **GitHub Pages**, set `base: "/hunza-sizzle/"` in `vite.config.js`, then
 `npm run build` and publish the `/dist` folder.
-"# hunza-sizzle-Prod" 
