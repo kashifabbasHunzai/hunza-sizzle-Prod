@@ -9,7 +9,12 @@ import {
   Building2, Navigation, ShoppingCart, BarChart3, TrendingUp, Boxes, Calendar, Pencil, Info, Wifi, WifiOff,
 } from "lucide-react";
 import { db, FIREBASE_READY } from "./firebase";
-import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
+import { doc, collection, getDoc, getDocs, setDoc, updateDoc, deleteDoc, onSnapshot, writeBatch, runTransaction } from "firebase/firestore";
+
+// Firestore rejects `undefined` field values outright (throws synchronously).
+// Several order fields are intentionally undefined (e.g. `table` on a delivery
+// order) — this strips them before any write so the app never crashes on save.
+const sanitize = (obj) => JSON.parse(JSON.stringify(obj));
 
 /* ================================================================== */
 /*  HUNZA SIZZLE — multi-branch restaurant system + online ordering    */
@@ -293,14 +298,28 @@ export default function App() {
      CROSS-DEVICE SYNC (Firebase Firestore)
      Without this, every phone/browser has its own private copy of
      orders/staff/menu/etc. — a waiter's order would never show up on
-     the admin's phone. With Firestore, all devices read/write the
-     same two documents in real time:
-       hunza/orders → { list: [...orders] }
-       hunza/meta   → { users, menu, inventory, purchases, requests, branchOpen }
+     the admin's phone.
+
+     Orders live in their OWN Firestore document each (collection
+     "orders", doc id = order id) — NOT one big array in one document.
+     That matters: if two devices both add an order at nearly the same
+     moment and they shared a single "list" document, the second
+     device's write would silently overwrite the first device's order
+     (last write wins on the whole array) — which is exactly why an
+     order could vanish before admin ever saw it. With one document per
+     order, two devices writing two different orders can never collide.
+
+     Order numbers (#105 etc.) come from an atomic counter document
+     (hunza/counters) updated inside a Firestore transaction, so two
+     devices can never be handed the same number even if they place an
+     order in the same second.
+
+     Staff/menu/inventory/purchases/requests/branchOpen change far less
+     often and are small, so they stay as one shared document (hunza/meta).
+
      If src/firebase.js still has placeholder keys (FIREBASE_READY is
      false), this whole block quietly does nothing and the app behaves
      exactly like before — local-only demo data.                    */
-  const remoteOrdersRef = useRef(null);
   const remoteMetaRef = useRef(null);
 
   // Seed Firestore once (first device ever to connect) so every later
@@ -310,9 +329,17 @@ export default function App() {
     if (!FIREBASE_READY) return;
     (async () => {
       try {
-        const oRef = doc(db, "hunza", "orders");
-        const oSnap = await getDoc(oRef);
-        if (!oSnap.exists()) await setDoc(oRef, { list: [...HISTORY, ...seed] });
+        const ordersCol = collection(db, "orders");
+        const existing = await getDocs(ordersCol);
+        if (existing.empty) {
+          const all = [...HISTORY, ...seed];
+          for (let i = 0; i < all.length; i += 400) {           // Firestore batch limit is 500 writes
+            const batch = writeBatch(db);
+            all.slice(i, i + 400).forEach((o) => batch.set(doc(db, "orders", o.id), sanitize(o)));
+            await batch.commit();
+          }
+          await setDoc(doc(db, "hunza", "counters"), { orderSeq: QC }, { merge: true });
+        }
         const mRef = doc(db, "hunza", "meta");
         const mSnap = await getDoc(mRef);
         if (!mSnap.exists()) await setDoc(mRef, { users: SEED_USERS, menu: SEED_MENU, inventory: SEED_INVENTORY, purchases: SEED_PURCHASES, requests: SEED_REQUESTS, branchOpen: { g91: true, i8: true } });
@@ -323,10 +350,8 @@ export default function App() {
   // Listen for changes made on OTHER devices and apply them here.
   useEffect(() => {
     if (!FIREBASE_READY) return;
-    const unsubOrders = onSnapshot(doc(db, "hunza", "orders"), (snap) => {
-      if (!snap.exists()) return;
-      const list = snap.data().list || [];
-      if (JSON.stringify(list) !== JSON.stringify(remoteOrdersRef.current)) { remoteOrdersRef.current = list; setOrders(list); }
+    const unsubOrders = onSnapshot(collection(db, "orders"), (snap) => {
+      setOrders(snap.docs.map((d) => d.data()));
       setOnline(true);
     }, (e) => { console.error("Firestore orders listen failed", e); });
     const unsubMeta = onSnapshot(doc(db, "hunza", "meta"), (snap) => {
@@ -346,25 +371,16 @@ export default function App() {
     return () => { unsubOrders(); unsubMeta(); };
   }, []);
 
-  // Push local changes (from any mutator like addOrder, addUser, restock…)
-  // up to Firestore, so other devices pick them up within ~1 second.
-  // The JSON-compare skips the write when this change is the one we just
-  // received *from* Firestore, so devices don't ping-pong writes at each other.
-  useEffect(() => {
-    if (!FIREBASE_READY) return;
-    const json = JSON.stringify(orders);
-    if (json === JSON.stringify(remoteOrdersRef.current)) return;
-    remoteOrdersRef.current = orders;
-    setDoc(doc(db, "hunza", "orders"), { list: orders }).catch((e) => console.error("Firestore orders write failed", e));
-  }, [orders]);
-
+  // Push meta changes (staff/menu/inventory/purchases/requests/branchOpen) up
+  // to Firestore. Orders are NOT pushed here — each order mutator (addOrder,
+  // markReady, cancel…) writes straight to that order's own document instead.
   useEffect(() => {
     if (!FIREBASE_READY) return;
     const current = { users, menu, inventory, purchases, requests, branchOpen };
     const json = JSON.stringify(current);
     if (json === JSON.stringify(remoteMetaRef.current)) return;
     remoteMetaRef.current = current;
-    setDoc(doc(db, "hunza", "meta"), current).catch((e) => console.error("Firestore meta write failed", e));
+    setDoc(doc(db, "hunza", "meta"), sanitize(current)).catch((e) => console.error("Firestore meta write failed", e));
   }, [users, menu, inventory, purchases, requests, branchOpen]);
 
   /* On load, work out where the visitor should land:
@@ -402,15 +418,27 @@ export default function App() {
   const branchRiders = (b) => users.filter((u) => u.role === "rider" && u.active && u.branch === b).map((u) => u.name);
   const lightestRider = (b) => { const ws = branchRiders(b); return ws.length ? [...ws].sort((x, y) => activeCount(x) - activeCount(y))[0] : "Unassigned"; };
 
-  const setStatus = (id, dir) => setOrders((prev) => prev.map((o) => {
-    if (o.id !== id) return o;
+  const updateOrderDoc = (id, patch) => { if (FIREBASE_READY) updateDoc(doc(db, "orders", id), sanitize(patch)).catch((e) => console.error("Firestore order update failed", e)); };
+
+  const setStatus = (id, dir) => {
+    const o = orders.find((x) => x.id === id); if (!o) return;
     const ni = Math.min(STAGES.length - 1, Math.max(0, STAGES.indexOf(o.status) + dir));
     const ns = STAGES[ni];
     if (ns !== o.status) { flash(id); if (ns === "ready") toast(`#${o.q} ready · ${o.waiter}`, STAGE.ready.color); }
-    return { ...o, status: ns };
-  }));
-  const markServed = (id) => setOrders((prev) => prev.map((o) => o.id === id ? (flash(id), { ...o, status: "completed" }) : o));
-  const markPreparing = (id) => setOrders((prev) => prev.map((o) => o.id === id && o.status === "new" ? (flash(id), { ...o, status: "preparing" }) : o));
+    if (FIREBASE_READY) updateOrderDoc(id, { status: ns });
+    else setOrders((prev) => prev.map((x) => x.id === id ? { ...x, status: ns } : x));
+  };
+  const markServed = (id) => {
+    flash(id);
+    if (FIREBASE_READY) updateOrderDoc(id, { status: "completed" });
+    else setOrders((prev) => prev.map((o) => o.id === id ? { ...o, status: "completed" } : o));
+  };
+  const markPreparing = (id) => {
+    const o = orders.find((x) => x.id === id); if (!o || o.status !== "new") return;
+    flash(id);
+    if (FIREBASE_READY) updateOrderDoc(id, { status: "preparing" });
+    else setOrders((prev) => prev.map((x) => x.id === id && x.status === "new" ? { ...x, status: "preparing" } : x));
+  };
 
   /* Notifications are addressed to a target: one or more roles, optionally a
      specific person's name and branch. NotifBell filters on these fields. */
@@ -418,8 +446,11 @@ export default function App() {
   /* Marking an order ready notifies whoever must act next:
      the assigned rider for deliveries, otherwise the assigned waiter. */
   const markReady = (id) => {
-    const o = orders.find((x) => x.id === id); if (!o || o.status === "ready" || o.status === "completed") { setOrders((prev) => prev.map((x) => x.id === id ? { ...x, status: "ready" } : x)); return; }
-    setOrders((prev) => prev.map((x) => x.id === id ? { ...x, status: "ready" } : x)); flash(id);
+    const o = orders.find((x) => x.id === id); if (!o) return;
+    flash(id);
+    if (FIREBASE_READY) updateOrderDoc(id, { status: "ready" });
+    else setOrders((prev) => prev.map((x) => x.id === id ? { ...x, status: "ready" } : x));
+    if (o.status === "ready" || o.status === "completed") return;
     const del = o.type === "delivery";
     const what = del ? "pick up for delivery" : o.type === "carhop" ? `take to car ${o.vehicle || ""}` : o.type === "takeaway" ? "hand over at counter" : `serve to table ${o.table || ""}`;
     pushNotif({ roles: [del ? "rider" : "waiter"], name: o.waiter, branch: o.branch }, `🔔 ${o.waiter}: Order #${o.q} ready — ${what}`, del ? "#9B8CFF" : "#29D3A6");
@@ -430,23 +461,52 @@ export default function App() {
      manager and admin. */
   const riderStep = (id, stage) => {
     const o = orders.find((x) => x.id === id); if (!o) return;
-    setOrders((prev) => prev.map((x) => x.id === id ? { ...x, deliveryStage: stage, status: stage === "delivered" ? "completed" : x.status, custMsg: `Rider ${o.waiter} ${STEP_MSG[stage]}.` } : x));
+    const patch = { deliveryStage: stage, status: stage === "delivered" ? "completed" : o.status, custMsg: `Rider ${o.waiter} ${STEP_MSG[stage]}.` };
     flash(id);
+    if (FIREBASE_READY) updateOrderDoc(id, patch);
+    else setOrders((prev) => prev.map((x) => x.id === id ? { ...x, ...patch } : x));
     toast(`🔔 Customer #${o.q}: Rider ${STEP_MSG[stage]}.`, "#5A9CFF");
     if (stage === "delivered") pushNotif({ roles: ["manager", "admin"], branch: o.branch }, `🔔 Order #${o.q} delivered by ${o.waiter} (${branchName(o.branch)})`, "#29D3A6");
   };
-  const cancel = (id) => setOrders((prev) => prev.filter((o) => o.id !== id));
-  const togglePriority = (id) => setOrders((prev) => prev.map((o) => o.id === id ? { ...o, priority: !o.priority } : o));
-  const setPaid = (id) => setOrders((prev) => prev.map((o) => o.id === id ? { ...o, payment: "paid" } : o));
+  const cancel = (id) => {
+    if (FIREBASE_READY) deleteDoc(doc(db, "orders", id)).catch((e) => console.error("Firestore order delete failed", e));
+    else setOrders((prev) => prev.filter((o) => o.id !== id));
+  };
+  const togglePriority = (id) => {
+    const o = orders.find((x) => x.id === id); if (!o) return;
+    if (FIREBASE_READY) updateOrderDoc(id, { priority: !o.priority });
+    else setOrders((prev) => prev.map((x) => x.id === id ? { ...x, priority: !x.priority } : x));
+  };
+  const setPaid = (id) => {
+    if (FIREBASE_READY) updateOrderDoc(id, { payment: "paid" });
+    else setOrders((prev) => prev.map((o) => o.id === id ? { ...o, payment: "paid" } : o));
+  };
 
   /* Creates an order and routes it automatically:
      delivery → the branch's least-busy rider; everything else → its least-busy
-     waiter. Orders start at "new" and wait for the counter to print them. */
-  const addOrder = (partial) => {
-    const q = ++qref.current;
+     waiter. Orders start at "new" and wait for the counter to print them.
+     Returns a Promise<order> — the order number comes from an atomic Firestore
+     counter (when online) so two devices can never be handed the same #. */
+  const addOrder = async (partial) => {
     let waiter = partial.waiter;
     if (partial.type === "delivery") waiter = lightestRider(partial.branch);
     else if (partial.source === "qr" || partial.source === "online" || partial.source === "car") waiter = lightestWaiter(partial.branch);
+
+    let q;
+    if (FIREBASE_READY) {
+      try {
+        q = await runTransaction(db, async (tx) => {
+          const counterRef = doc(db, "hunza", "counters");
+          const snap = await tx.get(counterRef);
+          const next = (snap.exists() ? (snap.data().orderSeq || 0) : qref.current) + 1;
+          tx.set(counterRef, { orderSeq: next }, { merge: true });
+          return next;
+        });
+      } catch (e) { console.error("Order counter transaction failed, falling back to local count", e); q = ++qref.current; }
+    } else {
+      q = ++qref.current;
+    }
+
     const o = { id: "o" + q, q, status: "new", payment: partial.payment || "unpaid",
       priority: false, createdAt: now(), notes: "", ...partial, waiter };
     /* Orders taken by a waiter at the counter don't pass fee/tax, so work them
@@ -458,7 +518,12 @@ export default function App() {
       o.taxRate = taxRate(o.branch, method);
       o.tax = taxOf(o.branch, method, o.items.reduce((a, b) => a + b.price * b.qty, 0) + o.fee);
     }
-    setOrders((prev) => [...prev, o]);
+    if (FIREBASE_READY) {
+      try { await setDoc(doc(db, "orders", o.id), sanitize(o)); }
+      catch (e) { console.error("Firestore order write failed", e); setOrders((prev) => [...prev, o]); /* still show it locally even if the write failed */ }
+    } else {
+      setOrders((prev) => [...prev, o]);
+    }
     flash(o.id);
     const where = branchName(partial.branch);
     if (partial.type === "delivery") toast(`Delivery #${q} → ${where} · Rider ${waiter}`, "#9B8CFF");
@@ -1066,7 +1131,7 @@ function TakeOrder({ ctx, me, branch, onDone }) {
       <button className="hz-cta" disabled={!items.length} onClick={() => {
         ctx.addOrder({ source: "waiter", branch, waiter: me, customer: name.trim() || "Guest", type: carhop ? "carhop" : "dinein",
           table: carhop ? undefined : table || "—", vehicle: carhop ? vehicle || "—" : undefined, spot: carhop ? spot || "—" : undefined,
-          notes, items: items.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) });
+          notes, items: items.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) }).catch((e) => console.error("Order submit failed", e));
         onDone();
       }}>Submit order<ArrowRight size={15} /></button>
     </div>
@@ -1251,12 +1316,13 @@ function OrderCheckout({ ctx, mode, branch, table, spotPrefill, items, sum, onBa
   const pickup = mode === "pickup";
   const [name, setName] = useState(""); const [phone, setPhone] = useState(""); const [address, setAddress] = useState("");
   const [vehicle, setVehicle] = useState(""); const [spot, setSpot] = useState(spotPrefill || ""); const [notes, setNotes] = useState("");
-  const [pay, setPay] = useState("cod"); const [err, setErr] = useState("");
+  const [pay, setPay] = useState("cod"); const [err, setErr] = useState(""); const [placing, setPlacing] = useState(false);
   const fee = delivery ? 120 : 0;
   const tRate = taxRate(branch, pay);
   const tax = taxOf(branch, pay, sum + fee);
   const payable = sum + fee + tax;
   const place = () => {
+    if (placing) return; // guard against double-tap while the previous request is still in flight
     if (!name.trim()) { setErr("Please enter your name."); return; }
     if ((delivery || pickup) && phone.trim().length < 7) { setErr("Please enter a valid phone number."); return; }
     if (delivery && !address.trim()) { setErr("A delivery address is required."); return; }
@@ -1274,7 +1340,10 @@ function OrderCheckout({ ctx, mode, branch, table, spotPrefill, items, sum, onBa
         address: delivery ? address.trim() : undefined, payment: pay === "card" ? "paid" : "unpaid",
         items: items.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) };
     }
-    onPlaced(ctx.addOrder(partial));
+    setErr(""); setPlacing(true);
+    ctx.addOrder(partial)
+      .then((o) => onPlaced(o))
+      .catch((e) => { console.error("Place order failed", e); setPlacing(false); setErr("Couldn't place the order — please check your connection and try again."); });
   };
   const title = dine ? `Dine-in${table ? " · Table " + table : ""}` : mode === "car" ? "Curbside" : delivery ? "Delivery" : "Takeaway";
   return (
@@ -1300,7 +1369,7 @@ function OrderCheckout({ ctx, mode, branch, table, spotPrefill, items, sum, onBa
         {branch === TAX_BRANCH && <div className="hz-branchnote"><Receipt size={12} />Pay by card and save {rs(taxOf(branch, "cod", sum + fee) - taxOf(branch, "card", sum + fee))}<InfoTip label="About sales tax">Sales tax at {branchName(TAX_BRANCH)} is 16% on cash payments but only 5% on card or online payments, so paying by card costs you less.</InfoTip></div>}
         {err && <div className="hz-err"><CircleAlert size={13} />{err}</div>}
         <div className="hz-corow"><button className="hz-back wide" onClick={onBack}>← Menu</button>
-          <button className="hz-cta" onClick={place}>Place order · {rs(payable)}<ArrowRight size={15} /></button></div>
+          <button className="hz-cta" disabled={placing} onClick={place}>{placing ? "Placing…" : <>Place order · {rs(payable)}</>}{!placing && <ArrowRight size={15} />}</button></div>
 
       </div>
     </div>

@@ -8,8 +8,11 @@ daalna hai.
 > phone/browser apna **alag** data rakhta tha — waiter ka order admin ke
 > phone par nazar nahi aata tha. Ab **Firebase Firestore** laga diya gaya
 > hai jo sab devices ko real-time mein sync karta hai (~1 second mein
-> update). Jab tak neeche wala setup nahi karte, app pehle jaisa hi
-> local-only chalega — kuch tootega nahi.
+> update) — har order ka apna alag document hai, is liye do devices ka
+> order kabhi ek doosre ko overwrite nahi karta, aur order number bhi
+> ek shared counter se atomically milta hai (do devices ko kabhi same
+> number nahi milega). Jab tak neeche wala setup nahi karte, app pehle
+> jaisa hi local-only chalega — kuch tootega nahi.
 
 ---
 
@@ -64,21 +67,25 @@ service cloud.firestore {
     match /hunza/{docId} {
       allow read, write: if true;
     }
+    match /orders/{orderId} {
+      allow read, write: if true;
+    }
   }
 }
 ```
 
 **Publish** dabayein.
 
-> ⚠️ **Imaandaar baat:** ye rule sirf `hunza/orders` aur `hunza/meta` do
-> documents tak read/write khol raha hai (poora database nahi) — lekin
-> yeh abhi bhi **koi login/permission check nahi karta**, bilkul waise
-> hi jaise abhi app ka baaqi hissa bhi client-side hai. Yani agar koi
-> aapki Firebase project ki `apiKey` dhoond le (jo public JS file mein
-> hoti hai), woh seedha data likh sakta hai. Chhote 2-branch setup ke
-> liye ye acceptable risk hai (jaisa GO_LIVE_GUIDE.md mein already
-> discuss hai), lekin jab business barhe to **Firebase Authentication**
-> laga kar rules ko role-based banana chahiye — ye ek follow-up kaam hai,
+> ⚠️ **Imaandaar baat:** ye rules `orders/{orderId}` collection aur
+> `hunza/{docId}` (jisme `meta` aur `counters` documents hain) tak
+> read/write khol rahe hain (poora database nahi) — lekin abhi bhi
+> **koi login/permission check nahi hai**, bilkul waise hi jaise abhi
+> app ka baaqi hissa bhi client-side hai. Yani agar koi aapki Firebase
+> project ki `apiKey` dhoond le (jo public JS file mein hoti hai), woh
+> seedha data likh sakta hai. Chhote 2-branch setup ke liye ye
+> acceptable risk hai (jaisa GO_LIVE_GUIDE.md mein already discuss
+> hai), lekin jab business barhe to **Firebase Authentication** laga
+> kar rules ko role-based banana chahiye — ye ek follow-up kaam hai,
 > abhi ke liye zaroori nahi.
 
 ---
