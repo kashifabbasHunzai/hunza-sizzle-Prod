@@ -31,12 +31,12 @@ import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT_ID.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID",
+  apiKey: "AIzaSyBE_ltpEWJMMUYni7Tak-NQOOocLby_Nig",
+  authDomain: "onlinefood-a4ec3.firebaseapp.com",
+  projectId: "onlinefood-a4ec3",
+  storageBucket: "onlinefood-a4ec3.firebasestorage.app",
+  messagingSenderId: "487001162053",
+  appId: "1:487001162053:web:d3180ae7a3af3bfa1b7e2c",
 };
 
 // If the placeholders above haven't been replaced yet, the app still
