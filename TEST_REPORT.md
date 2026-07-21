@@ -1,4 +1,4 @@
-# The Hunza Sizzle — Test Report
+# De-De-Hunza Sizzle — Test Report
 
 **Date:** July 2026 · **Scope:** front-end application (`src/App.jsx`)
 

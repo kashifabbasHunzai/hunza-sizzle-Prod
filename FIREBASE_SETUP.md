@@ -70,6 +70,9 @@ service cloud.firestore {
     match /orders/{orderId} {
       allow read, write: if true;
     }
+    match /notifs/{notifId} {
+      allow read, write: if true;
+    }
   }
 }
 ```

@@ -9,7 +9,7 @@ import {
   Building2, Navigation, ShoppingCart, BarChart3, TrendingUp, Boxes, Calendar, Pencil, Info, Wifi, WifiOff,
 } from "lucide-react";
 import { db, FIREBASE_READY } from "./firebase";
-import { doc, collection, getDoc, getDocs, setDoc, updateDoc, deleteDoc, onSnapshot, writeBatch, runTransaction } from "firebase/firestore";
+import { doc, collection, getDoc, getDocs, setDoc, updateDoc, deleteDoc, onSnapshot, writeBatch, runTransaction, query, orderBy, limit } from "firebase/firestore";
 
 // Firestore rejects `undefined` field values outright (throws synchronously).
 // Several order fields are intentionally undefined (e.g. `table` on a delivery
@@ -354,6 +354,9 @@ export default function App() {
       setOrders(snap.docs.map((d) => d.data()));
       setOnline(true);
     }, (e) => { console.error("Firestore orders listen failed", e); });
+    const unsubNotifs = onSnapshot(query(collection(db, "notifs"), orderBy("time", "desc"), limit(60)), (snap) => {
+      setNotifs(snap.docs.map((d) => d.data()));
+    }, (e) => { console.error("Firestore notifs listen failed", e); });
     const unsubMeta = onSnapshot(doc(db, "hunza", "meta"), (snap) => {
       if (!snap.exists()) return;
       const d = snap.data();
@@ -368,7 +371,7 @@ export default function App() {
       }
       setOnline(true);
     }, (e) => { console.error("Firestore meta listen failed", e); });
-    return () => { unsubOrders(); unsubMeta(); };
+    return () => { unsubOrders(); unsubNotifs(); unsubMeta(); };
   }, []);
 
   // Push meta changes (staff/menu/inventory/purchases/requests/branchOpen) up
@@ -441,8 +444,19 @@ export default function App() {
   };
 
   /* Notifications are addressed to a target: one or more roles, optionally a
-     specific person's name and branch. NotifBell filters on these fields. */
-  const pushNotif = (target, msg, color) => { const id = Math.random().toString(36).slice(2); setNotifs((p) => [{ id, ...target, msg, color, time: now() }, ...p].slice(0, 60)); toast(msg, color); };
+     specific person's name and branch. NotifBell filters on these fields.
+     These now sync via Firestore too — otherwise a notification pushed by
+     the admin's device (e.g. "order ready") would only ever appear in the
+     admin's own browser and never reach the waiter's phone. Each notif is
+     its own document for the same reason orders are: two devices pushing
+     notifs seconds apart must never overwrite one another. */
+  const pushNotif = (target, msg, color) => {
+    const id = Math.random().toString(36).slice(2);
+    const n = { id, ...target, msg, color, time: now() };
+    if (FIREBASE_READY) setDoc(doc(db, "notifs", id), sanitize(n)).catch((e) => console.error("Firestore notif write failed", e));
+    else setNotifs((p) => [n, ...p].slice(0, 60));
+    toast(msg, color);
+  };
   /* Marking an order ready notifies whoever must act next:
      the assigned rider for deliveries, otherwise the assigned waiter. */
   const markReady = (id) => {
@@ -480,6 +494,12 @@ export default function App() {
   const setPaid = (id) => {
     if (FIREBASE_READY) updateOrderDoc(id, { payment: "paid" });
     else setOrders((prev) => prev.map((o) => o.id === id ? { ...o, payment: "paid" } : o));
+  };
+  /* Used when a claimed online payment turns out NOT to have arrived — sends
+     the order back to "unpaid" so cash can be collected instead. */
+  const setUnpaid = (id) => {
+    if (FIREBASE_READY) updateOrderDoc(id, { payment: "unpaid" });
+    else setOrders((prev) => prev.map((o) => o.id === id ? { ...o, payment: "unpaid" } : o));
   };
 
   /* Creates an order and routes it automatically:
@@ -608,7 +628,7 @@ export default function App() {
   }, [orders]);
 
   const ctx = { orders, queue, users, inventory, requests, menu, branchWaiters, lightestWaiter, branchRiders, lightestRider, activeCount,
-    setStatus, markServed, markPreparing, markReady, riderStep, notifs, cancel, togglePriority, setPaid, addOrder, addUser, toggleUser, deleteUser,
+    setStatus, markServed, markPreparing, markReady, riderStep, notifs, cancel, togglePriority, setPaid, setUnpaid, addOrder, addUser, toggleUser, deleteUser,
     setSalary, addAdvance, paySalary, unpaySalary, addStock, restock, buyStock, purchases, addRequest, fulfillRequest, rejectRequest,
     addMenuItem, toggleMenuItem, toggleMenuBranch, deleteMenuItem, updateMenuItem, updateUser, updateInventory, deleteInventory, branchOpen, toggleBranch,
     pulse: pulse.current, auto, setAuto, toast };
@@ -674,7 +694,7 @@ export default function App() {
       <header className="hz-bar">
         <div className="hz-brand">
           <div className="hz-logo"><HunzaLogo size={30} compact /></div>
-          <div><div className="hz-bn">The Hunza <span>Sizzle</span></div><div className="hz-bs">{rm.sub}</div></div>
+          <div><div className="hz-bn">De-Hunza <span>Sizzle</span></div><div className="hz-bs">{rm.sub}</div></div>
         </div>
         <div className="hz-ident"><span className="hz-ident-ic"><rm.icon size={14} /></span>{rm.label}</div>
         <div className="hz-bar-r">
@@ -724,7 +744,7 @@ function HomePage({ menu, dark, setDark, branchOpen, onOrder, onStaff }) {
     <div className="hz-home">
       <header className="hz-hnav">
         {/* Logo doubles as the hidden staff entry (5 taps) — looks like plain branding. */}
-        <div className="hz-brand" onClick={secretTap} title="The Hunza Sizzle"><div className="hz-logo"><HunzaLogo size={30} compact /></div><div className="hz-bn">The Hunza <span>Sizzle</span></div></div>
+        <div className="hz-brand" onClick={secretTap} title="De-Hunza Sizzle"><div className="hz-logo"><HunzaLogo size={30} compact /></div><div className="hz-bn">De-Hunza <span>Sizzle</span></div></div>
         <nav className="hz-hnav-links">
           <button className="hz-hlink active" onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}><Home size={14} />Home</button>
           <button className="hz-hlink" onClick={onOrder}><ShoppingBag size={14} />Order Online</button>
@@ -772,7 +792,7 @@ function HomePage({ menu, dark, setDark, branchOpen, onOrder, onStaff }) {
         <div className="hz-hbranches">{BRANCHES.map((b) => { const open = branchOpen?.[b.id] !== false; return (
           <div className={"hz-hbranch" + (open ? "" : " closed")} key={b.id}>
             <div className="hz-hbranch-top"><span className="hz-branch-ic"><Building2 size={20} /></span><span className={open ? "hz-openpill" : "hz-closedpill"}>{open ? "Open now" : "Closed"}</span></div>
-            <b>The Hunza Sizzle · {b.name}</b>
+            <b>De-Hunza Sizzle · {b.name}</b>
             <span className="hz-hbranch-addr"><MapPin size={12} />{b.addr}</span>
             <span className="hz-hbranch-addr"><Clock size={12} />11:00 AM – 2:00 AM daily</span>
             <button className="hz-cta sm" disabled={!open} onClick={onOrder}>{open ? `Order from ${b.name}` : "Currently closed"}{open && <ArrowRight size={14} />}</button>
@@ -785,8 +805,8 @@ function HomePage({ menu, dark, setDark, branchOpen, onOrder, onStaff }) {
       </section>
 
       <footer className="hz-hfoot">
-        <div className="hz-brand"><div className="hz-logo"><HunzaLogo size={26} compact /></div><div className="hz-bn">The Hunza <span>Sizzle</span></div></div>
-        <span>G-9/1 · I-8 Markaz, Islamabad · © {new Date().getFullYear()} The Hunza Sizzle</span>
+        <div className="hz-brand"><div className="hz-logo"><HunzaLogo size={26} compact /></div><div className="hz-bn">De-Hunza <span>Sizzle</span></div></div>
+        <span>G-9/1 · I-8 Markaz, Islamabad · © {new Date().getFullYear()} De-Hunza Sizzle</span>
       </footer>
     </div>
   );
@@ -829,7 +849,7 @@ function Login({ onLogin, dark, setDark, users, onHome, onOrder }) {
       </div>
       <div className="hz-login-brand">
         <div className="hz-logo lg"><HunzaLogo size={44} /></div>
-        <div className="hz-bn lg">The Hunza <span>Sizzle</span></div>
+        <div className="hz-bn lg">De-Hunza <span>Sizzle</span></div>
         <div className="hz-login-sub">Staff Login · G-9/1 · I-8 Markaz</div>
       </div>
 
@@ -931,12 +951,12 @@ function InfoTip({ children, icon: Icon = Info, label }) {
   );
 }
 /* ---------------------------- Brand logo ---------------------------
-   The Hunza Sizzle mark, rebuilt as SVG so it stays sharp at any size
+   De-Hunza Sizzle mark, rebuilt as SVG so it stays sharp at any size
    and can inherit theme colours. `compact` drops the fine detail for
    the small header lockup.                                            */
 function HunzaLogo({ size = 34, compact = false }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 120 120" fill="none" role="img" aria-label="The Hunza Sizzle">
+    <svg width={size} height={size} viewBox="0 0 120 120" fill="none" role="img" aria-label="De-Hunza Sizzle">
       {/* stem rising from the ring */}
       <path d="M80 58 L80 14 Q80 6 87 6 Q94 6 94 14 L94 58 Z" fill="#FFC220" />
       {/* open ring */}
@@ -1070,7 +1090,7 @@ function Rider({ ctx, me, branch }) {
               <div className="hz-deliverto"><Home size={14} /><span>Deliver to</span><b>{o.customer}</b></div>
               <div className="hz-rideraddr"><MapPin size={13} />{o.address || "—"}{o.phone && <a className="hz-ridercall" href={`tel:${o.phone}`}><Phone size={12} />{o.phone}</a>}</div>
               <div className="hz-witems">{o.items.map((i) => `${i.qty}× ${i.name}`).join(" · ")}{o.notes && <em> · “{o.notes}”</em>}</div>
-              <div className="hz-mfoot" style={{ marginBottom: 10 }}><b>{rs(grand(o))}</b><span className={"hz-pay " + o.payment}>{o.payment === "paid" ? "Prepaid" : "Collect cash"}</span></div>
+              <div className="hz-mfoot" style={{ marginBottom: 10 }}><b>{rs(grand(o))}</b><span className={"hz-pay " + o.payment}>{o.payment === "paid" ? "Prepaid" : o.payment === "pending" ? "Paid online (unverified)" : "Collect cash"}</span></div>
               {!isReady ? (
                 <div className="hz-wstatusnote"><Clock size={13} />Preparing… pick up as soon as it is ready · ETA {etaMins(o)}m</div>
               ) : (
@@ -1142,20 +1162,28 @@ function TakeOrder({ ctx, me, branch, onDone }) {
 /* Billing counter — today's and still-active orders for this branch, so the
    cashier can take payment and re-print receipts. */
 function Cashier({ ctx, branch }) {
-  const list = ctx.orders.filter((o) => o.branch === branch && (ACTIVE(o.status) || isToday(o.createdAt))).sort((a, b) => (a.payment === "unpaid" ? 0 : 1) - (b.payment === "unpaid" ? 0 : 1) || b.createdAt - a.createdAt);
+  const list = ctx.orders.filter((o) => o.branch === branch && (ACTIVE(o.status) || isToday(o.createdAt)))
+    .sort((a, b) => (a.payment === "paid" ? 1 : 0) - (b.payment === "paid" ? 1 : 0) || b.createdAt - a.createdAt);
   const due = ctx.orders.filter((o) => o.branch === branch && o.payment === "unpaid" && (ACTIVE(o.status) || isToday(o.createdAt))).reduce((a, b) => a + grand(b), 0);
+  const pendingCount = ctx.orders.filter((o) => o.branch === branch && o.payment === "pending" && (ACTIVE(o.status) || isToday(o.createdAt))).length;
+  const PAY_LABEL = { paid: "Paid", unpaid: "Unpaid", pending: "Pending" };
   return (
     <div className="hz-wrap narrow">
-      <Head title="Billing Counter" sub={`${branchName(branch)} · ${rs(due)} pending`} />
+      <Head title="Billing Counter" sub={`${branchName(branch)} · ${rs(due)} cash pending${pendingCount ? ` · ${pendingCount} online payment${pendingCount > 1 ? "s" : ""} to verify` : ""}`} />
+      {pendingCount > 0 && <div className="hz-branchnote" style={{ marginBottom: 14 }}><AlertTriangle size={13} />Online payment claims aren't auto-confirmed — check your bank/JazzCash/Easypaisa and verify each one before treating it as paid.</div>}
       <div className="hz-stack">
         {list.map((o) => { const T = typeMeta(o); return (
           <div className={"hz-billrow" + (flashing(ctx, o.id) ? " flash" : "")} key={o.id}>
-            <div className="hz-mhead"><span className="hz-tq"><Hash size={12} />{o.q}</span><Badge s={o.status} sm /><span className={"hz-pay " + o.payment}>{o.payment === "paid" ? "Paid" : "Unpaid"}</span></div>
+            <div className="hz-mhead"><span className="hz-tq"><Hash size={12} />{o.q}</span><Badge s={o.status} sm /><span className={"hz-pay " + o.payment}>{PAY_LABEL[o.payment] || o.payment}</span></div>
             <div className="hz-mmeta"><span><T.icon size={12} />{T.label}</span><span><User size={12} />{o.customer}</span></div>
             <div className="hz-mitems">{o.items.map((i) => `${i.qty}× ${i.name}`).join(" · ")}</div>
             <div className="hz-mfoot"><b>{rs(grand(o))}</b><div className="hz-macts">
-              {o.payment !== "paid" ? <button className="hz-paybtn" onClick={() => { ctx.setPaid(o.id); ctx.toast(`#${o.q} paid · receipt printed`, "#29D3A6"); }}><Receipt size={14} />Take payment</button>
-                : <button className="hz-mini" onClick={() => ctx.toast(`#${o.q} receipt re-printed`, "#5A9CFF")}><Receipt size={13} /></button>}
+              {o.payment === "unpaid" && <button className="hz-paybtn" onClick={() => { ctx.setPaid(o.id); ctx.toast(`#${o.q} paid · receipt printed`, "#29D3A6"); }}><Receipt size={14} />Take payment</button>}
+              {o.payment === "pending" && <>
+                <button className="hz-paybtn" onClick={() => { ctx.setPaid(o.id); ctx.toast(`#${o.q} payment verified`, "#29D3A6"); }}><ShieldCheck size={14} />Verify received</button>
+                <button className="hz-mini" title="Payment not received — switch to cash" onClick={() => { ctx.setUnpaid(o.id); ctx.toast(`#${o.q} moved back to cash-due`, "#FF5470"); }}><AlertTriangle size={13} /></button>
+              </>}
+              {o.payment === "paid" && <button className="hz-mini" onClick={() => ctx.toast(`#${o.q} receipt re-printed`, "#5A9CFF")}><Receipt size={13} /></button>}
             </div></div>
           </div>
         ); })}
@@ -1255,7 +1283,7 @@ function OrderFlow({ ctx, dark, setDark, onHome, onStaff, entry }) {
   const bar = (
     <header className="hz-obar">
       <button className="hz-oback" onClick={step === "menu" ? onHome : () => setStep("menu")}><ChevronLeft size={18} /></button>
-      <div className="hz-brand"><div className="hz-logo"><HunzaLogo size={30} compact /></div><div><div className="hz-bn">The Hunza <span>Sizzle</span></div><div className="hz-bs">{qrEntry ? (entryKind === "car" ? "Curbside" : "Dine-in") : "Order"}</div></div></div>
+      <div className="hz-brand"><div className="hz-logo"><HunzaLogo size={30} compact /></div><div><div className="hz-bn">De-Hunza <span>Sizzle</span></div><div className="hz-bs">{qrEntry ? (entryKind === "car" ? "Curbside" : "Dine-in") : "Order"}</div></div></div>
       <button className="hz-ohome" onClick={onHome}><Home size={14} />{qrEntry ? "Exit" : "Home"}</button>
       <button className="hz-icbtn" onClick={() => setDark((v) => !v)}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button>
     </header>
@@ -1275,7 +1303,7 @@ function OrderFlow({ ctx, dark, setDark, onHome, onStaff, entry }) {
         {qrEntry ? (
           <div className="hz-dinebanner">
             <span className="hz-dine-ic">{entryKind === "car" ? <Car size={18} /> : <QrCode size={18} />}</span>
-            <div><b>Welcome to The Hunza Sizzle</b><span>{branchName(branch)}{entryKind === "car" ? " · Curbside (car)" : entry.table ? ` · Table ${entry.table}` : ""} · scan-to-order</span></div>
+            <div><b>Welcome to De-Hunza Sizzle</b><span>{branchName(branch)}{entryKind === "car" ? " · Curbside (car)" : entry.table ? ` · Table ${entry.table}` : ""} · scan-to-order</span></div>
           </div>
         ) : (
           <div className="hz-modetabs">
@@ -1329,15 +1357,21 @@ function OrderCheckout({ ctx, mode, branch, table, spotPrefill, items, sum, onBa
     if (mode === "car" && (!vehicle.trim() || !spot.trim())) { setErr("Please enter your vehicle number and parking spot."); return; }
     const money = { fee, tax, taxRate: tRate, payMethod: pay };
     let partial;
+    // Online/card payment isn't actually verified here (no payment gateway is
+    // wired up) — it only means "customer claims to have paid online", so it
+    // starts as "pending" until staff confirm the money actually landed
+    // (see Cashier / Manager Operations → "Verify payment"). Cash orders are
+    // simply "unpaid" until collected in person, same as before.
+    const payStatus = pay === "card" ? "pending" : "unpaid";
     if (dine) {
       partial = { source: "qr", branch, type: "dinein", table: table || "—", customer: name.trim(), notes: notes.trim(), ...money,
-        payment: pay === "card" ? "paid" : "unpaid", items: items.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) };
+        payment: payStatus, items: items.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) };
     } else if (mode === "car") {
       partial = { source: "car", branch, type: "carhop", customer: name.trim(), vehicle: vehicle.trim(), spot: spot.trim(), ...money,
-        payment: pay === "card" ? "paid" : "unpaid", items: items.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) };
+        payment: payStatus, items: items.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) };
     } else {
       partial = { source: "online", branch, type: delivery ? "delivery" : "takeaway", customer: name.trim(), phone: phone.trim(), ...money,
-        address: delivery ? address.trim() : undefined, payment: pay === "card" ? "paid" : "unpaid",
+        address: delivery ? address.trim() : undefined, payment: payStatus,
         items: items.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) };
     }
     setErr(""); setPlacing(true);
@@ -1567,7 +1601,7 @@ function ManagerOps({ ctx, branch, onPrint }) {
           <div className="hz-card-h"><h3>All Orders</h3><span className="hz-card-sub">print → kitchen ticket + bill</span></div>
           <div className="hz-stack">{all.map((o) => { const T = typeMeta(o); const del = o.type === "delivery"; return (
             <div className={"hz-mrow" + (flashing(ctx, o.id) ? " flash" : "") + (o.status === "new" ? " isnew" : "")} key={o.id}>
-              <div className="hz-mhead"><span className="hz-tq"><Hash size={12} />{o.q}</span><Badge s={o.status} sm /><BranchTag b={o.branch} />{ACTIVE(o.status) && <span className="hz-qpos">Q#{ctx.queue[o.id]}</span>}{(o.source === "qr" || o.source === "online" || o.source === "car") && <span className="hz-srctag">{o.source}</span>}<span className={"hz-pay " + o.payment}>{o.payment === "paid" ? "Paid" : "Unpaid"}</span></div>
+              <div className="hz-mhead"><span className="hz-tq"><Hash size={12} />{o.q}</span><Badge s={o.status} sm /><BranchTag b={o.branch} />{ACTIVE(o.status) && <span className="hz-qpos">Q#{ctx.queue[o.id]}</span>}{(o.source === "qr" || o.source === "online" || o.source === "car") && <span className="hz-srctag">{o.source}</span>}<span className={"hz-pay " + o.payment}>{o.payment === "paid" ? "Paid" : o.payment === "pending" ? "Verify payment" : "Unpaid"}</span></div>
               <div className="hz-mmeta"><span><T.icon size={12} />{T.label}</span><span><User size={12} />{o.customer}</span><span>{del ? <Bike size={12} /> : <Users size={12} />}{o.waiter}</span><span><Clock size={12} />{clock(o.createdAt)}</span></div>
               <div className="hz-mitems">{o.items.map((i) => `${i.qty}× ${i.name}`).join(" · ")}</div>
               <div className="hz-mfoot"><b>{rs(grand(o))}</b>{ACTIVE(o.status) && <span className="hz-eta">ETA {etaMins(o)}m</span>}
@@ -1575,7 +1609,11 @@ function ManagerOps({ ctx, branch, onPrint }) {
                   <button className="hz-printbtn" onClick={() => doPrint(o)}><Receipt size={13} />{o.status === "new" ? "Print" : "Re-print"}</button>
                   {o.status === "preparing" && <button className="hz-mini" title="Mark ready" aria-label="Mark ready" onClick={() => ctx.markReady(o.id)}><Check size={13} /></button>}
                   <button className={"hz-mini" + (o.priority ? " active" : "")} onClick={() => ctx.togglePriority(o.id)}><Star size={13} /></button>
-                  {o.payment !== "paid" && <button className="hz-mini" onClick={() => ctx.setPaid(o.id)}><Wallet size={13} /></button>}
+                  {o.payment === "unpaid" && <button className="hz-mini" title="Mark paid — cash received" onClick={() => ctx.setPaid(o.id)}><Wallet size={13} /></button>}
+                  {o.payment === "pending" && <>
+                    <button className="hz-mini" title="Verify — online payment received" onClick={() => ctx.setPaid(o.id)}><ShieldCheck size={13} /></button>
+                    <button className="hz-mini" title="Not received — switch to cash" onClick={() => ctx.setUnpaid(o.id)}><AlertTriangle size={13} /></button>
+                  </>}
                   <button className="hz-mini danger" onClick={() => ctx.cancel(o.id)}><Trash2 size={13} /></button></div></div>
             </div>); })}
           </div>
@@ -2070,7 +2108,7 @@ function PrintModal({ order: o, onClose }) {
         <div className="hz-receipt kitchen">
           <div className="hz-rc-tag">KITCHEN COPY</div>
           <div className="hz-rc-title">KITCHEN TICKET</div>
-          <div className="hz-rc-sub">The Hunza Sizzle · {branchName(o.branch)}</div>
+          <div className="hz-rc-sub">De-Hunza Sizzle · {branchName(o.branch)}</div>
           <div className="hz-rc-hr" />
           <div className="hz-rc-row"><span>Order</span><b>#{o.q}</b></div>
           <div className="hz-rc-row"><span>Type</span><b>{typeLabel}</b></div>
@@ -2088,7 +2126,7 @@ function PrintModal({ order: o, onClose }) {
         {/* 2) CUSTOMER BILL — full details + prices */}
         <div className="hz-receipt bill">
           <div className="hz-rc-tag alt">CUSTOMER COPY</div>
-          <div className="hz-rc-title big">The Hunza Sizzle</div>
+          <div className="hz-rc-title big">De-Hunza Sizzle</div>
           <div className="hz-rc-sub">{branchName(o.branch)} · {BRANCHES.find((b) => b.id === o.branch)?.addr}</div>
           <div className="hz-rc-sub">Sales Receipt</div>
           <div className="hz-rc-hr" />
@@ -2111,9 +2149,9 @@ function PrintModal({ order: o, onClose }) {
           {fee > 0 && <div className="hz-rc-row"><span>Delivery fee</span><b>{rs(fee)}</b></div>}
           {tax > 0 && <div className="hz-rc-row"><span>Sales tax ({Math.round(tRate * 100)}%)</span><b>{rs(tax)}</b></div>}
           <div className="hz-rc-row total"><span>TOTAL</span><b>{rs(subtotal + fee + tax)}</b></div>
-          <div className="hz-rc-row"><span>Payment</span><b>{(o.payMethod === "card" ? "CARD/ONLINE · " : o.payMethod ? "CASH · " : "") + (o.payment === "paid" ? "PAID" : "UNPAID")}</b></div>
+          <div className="hz-rc-row"><span>Payment</span><b>{(o.payMethod === "card" ? "CARD/ONLINE · " : o.payMethod ? "CASH · " : "") + (o.payment === "paid" ? "PAID" : o.payment === "pending" ? "PENDING VERIFICATION" : "UNPAID")}</b></div>
           <div className="hz-rc-hr" />
-          <div className="hz-rc-foot">Thank you for choosing The Hunza Sizzle!<br />Chinese &amp; Fast Food · Islamabad</div>
+          <div className="hz-rc-foot">Thank you for choosing De-Hunza Sizzle!<br />Chinese &amp; Fast Food · Islamabad</div>
         </div>
       </div>
     </div>
@@ -2416,6 +2454,7 @@ const CSS = `
 .hz-pay{margin-left:auto;font-size:10.5px;font-weight:700;padding:3px 8px;border-radius:6px;}
 .hz-pay.paid{color:var(--jade);background:color-mix(in srgb,var(--jade) 14%,transparent);}
 .hz-pay.unpaid{color:var(--saffron);background:color-mix(in srgb,var(--saffron) 14%,transparent);}
+.hz-pay.pending{color:#9B8CFF;background:color-mix(in srgb,#9B8CFF 16%,transparent);}
 .hz-mmeta{display:flex;flex-wrap:wrap;gap:9px;font-size:11.5px;color:var(--muted);margin-bottom:7px;}
 .hz-mmeta span{display:inline-flex;align-items:center;gap:4px;}
 .hz-mitems{font-size:12.5px;margin-bottom:7px;}
@@ -2829,12 +2868,24 @@ const CSS = `
 .hz-printroot.show-kitchen .hz-receipt.bill{opacity:.35;}
 .hz-printroot.show-bill .hz-receipt.kitchen{opacity:.35;}
 @media print {
+  /* Thermal receipt printers feed a continuous roll, not a fixed A4/Letter
+     page. Without this, the browser defaults to a full A4 page height and
+     feeds a large blank strip of paper after the (much shorter) receipt
+     before cutting. "auto" height lets the page end exactly where the
+     content ends. 80mm matches the common small receipt-printer width —
+     narrow 58mm printers still work fine since content is capped at 320px. */
+  @page { size: 80mm auto; margin: 0; }
+  html, body { margin: 0 !important; padding: 0 !important; height: auto !important; }
   body * { visibility: hidden !important; }
   .hz-printroot, .hz-printroot * { visibility: visible !important; }
-  .hz-printroot { position:absolute; inset:0; background:#fff !important; backdrop-filter:none; padding:0; display:block; }
+  .hz-printroot { position:absolute; inset:0; background:#fff !important; backdrop-filter:none; padding:0; display:block; height:auto !important; }
   .hz-print-toolbar, .hz-print-toolbar * { visibility: hidden !important; display:none !important; }
   .hz-receipts { gap:0; }
-  .hz-receipt { width:100%; max-width:320px; page-break-after:always; border-radius:0; opacity:1 !important; }
+  /* No forced break after a single copy — that was pushing out an entire
+     extra blank page of paper even when printing just one ticket. A break
+     is only needed between the two copies when printing "both". */
+  .hz-receipt { width:100%; max-width:320px; border-radius:0; opacity:1 !important; page-break-after:avoid; page-break-inside:avoid; }
+  .hz-printroot.show-both .hz-receipt.kitchen { page-break-after:always; }
   .hz-printroot.show-kitchen .hz-receipt.bill { display:none !important; }
   .hz-printroot.show-bill .hz-receipt.kitchen { display:none !important; }
 }

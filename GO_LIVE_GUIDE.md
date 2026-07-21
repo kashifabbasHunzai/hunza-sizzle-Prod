@@ -1,4 +1,4 @@
-# The Hunza Sizzle — Go-Live Guide (domain, database, server, security)
+# De-De-Hunza Sizzle — Go-Live Guide (domain, database, server, security)
 
 Aap ke paas domain hai aur ab is app ko **real life me chalana** hai. Ye guide
 shuru se aakhir tak step-by-step batati hai: kya banana hai, kis tarteeb se, aur

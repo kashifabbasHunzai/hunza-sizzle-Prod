@@ -1,4 +1,4 @@
-# The Hunza Sizzle — Security Audit Report
+# De-De-Hunza Sizzle — Security Audit Report
 
 **Date:** July 2026
 **Scope:** the front-end application (`src/App.jsx`) as it exists today.

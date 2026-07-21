@@ -1,6 +1,6 @@
-# The Hunza Sizzle — Restaurant Management System (prototype)
+# De-De-Hunza Sizzle — Restaurant Management System (prototype)
 
-Multi-branch restaurant system for **The Hunza Sizzle** (Chinese & Fast Food, Islamabad).
+Multi-branch restaurant system for **De-De-Hunza Sizzle** (Chinese & Fast Food, Islamabad).
 Branches: **G-9/1** and **I-8 Markaz**.
 
 Roles: Admin, Manager, Kitchen, Waiter, Cashier — plus a public **online ordering**
@@ -52,7 +52,7 @@ Customers order from the **Home page → Order Online**, or via a **QR code**
 ```bash
 git init
 git add .
-git commit -m "The Hunza Sizzle RMS prototype"
+git commit -m "De-De-Hunza Sizzle RMS prototype"
 git branch -M main
 git remote add origin https://github.com/<YOUR-USERNAME>/hunza-sizzle.git
 git push -u origin main
