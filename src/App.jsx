@@ -39,6 +39,10 @@ const isYesterday = (ts) => ts >= dayStart(now()) - DAY && ts < dayStart(now());
 const isLast7 = (ts) => ts >= dayStart(now()) - 6 * DAY;
 const isThisMonth = (ts) => { const n = new Date(), d = new Date(ts); return d.getMonth() === n.getMonth() && d.getFullYear() === n.getFullYear(); };
 const isThisYear = (ts) => new Date(ts).getFullYear() === new Date().getFullYear();
+/* Human label for a date-group header: "Today" / "Yesterday" / an actual
+   date for anything older, so old and new orders never look like one
+   undated pile. */
+const dayLabel = (ts) => isToday(ts) ? "Today" : isYesterday(ts) ? "Yesterday" : new Date(ts).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 
 const BRANCHES = [
   { id: "g91", name: "G-9/1", area: "Islamabad", addr: "Karachi Company, G-9/1" },
@@ -1556,7 +1560,20 @@ function DashCard({ icon: Icon, label, val, sub, c, big }) {
    list where staff print tickets and mark orders ready. */
 function ManagerOps({ ctx, branch, onPrint }) {
   const inB = (o) => branch === "all" || o.branch === branch;
-  const all = ctx.orders.filter(inB).filter((o) => ACTIVE(o.status) || isToday(o.createdAt)).sort((a, b) => (b.priority - a.priority) || (a.createdAt - b.createdAt));
+  const [dayFilter, setDayFilter] = useState("today"); // today | yesterday | week | all
+  const DAY_FILTERS = [
+    { id: "today", label: "Today", test: (ts) => isToday(ts) },
+    { id: "yesterday", label: "Yesterday", test: (ts) => isYesterday(ts) },
+    { id: "week", label: "Last 7 Days", test: (ts) => isLast7(ts) },
+    { id: "all", label: "All", test: () => true },
+  ];
+  const dayTest = DAY_FILTERS.find((d) => d.id === dayFilter).test;
+  /* Any order still in progress (new/preparing/ready) always stays visible
+     regardless of the date filter — an active order from yesterday must
+     never silently disappear just because "Today" is selected. Completed/
+     cancelled orders, on the other hand, strictly follow the date filter so
+     old and new history don't pile up together undated. */
+  const all = ctx.orders.filter(inB).filter((o) => ACTIVE(o.status) || dayTest(o.createdAt)).sort((a, b) => (dayStart(b.createdAt) - dayStart(a.createdAt)) || (b.priority - a.priority) || (a.createdAt - b.createdAt));
   const active = all.filter((o) => ACTIVE(o.status));
   const revenue = all.reduce((a, b) => a + grand(b), 0);
   const lowStock = ctx.inventory.filter((i) => (branch === "all" || i.branch === branch) && i.stock <= i.low).length;
@@ -1567,6 +1584,10 @@ function ManagerOps({ ctx, branch, onPrint }) {
   ]);
   const maxLoad = Math.max(1, ...team.map((x) => ctx.activeCount(x.w)));
   const doPrint = (o) => { ctx.markPreparing(o.id); onPrint(o); };
+  /* Group the visible orders under date headers (Today / Yesterday / 12 Jan
+     2026 …) in the order they naturally sort in — this is what actually
+     keeps different days visually separated instead of one long mixed list. */
+  const groups = []; { let last = null; for (const o of all) { const lbl = dayLabel(o.createdAt); if (lbl !== last) { groups.push({ label: lbl, items: [] }); last = lbl; } groups[groups.length - 1].items.push(o); } }
   return (
     <>
       <div className="hz-mkpis">
@@ -1599,7 +1620,12 @@ function ManagerOps({ ctx, branch, onPrint }) {
         </div>
         <div className="hz-card hz-orderscard">
           <div className="hz-card-h"><h3>All Orders</h3><span className="hz-card-sub">print → kitchen ticket + bill</span></div>
-          <div className="hz-stack">{all.map((o) => { const T = typeMeta(o); const del = o.type === "delivery"; return (
+          <div className="hz-daychips">{DAY_FILTERS.map((d) => <button key={d.id} className={"hz-daychip" + (dayFilter === d.id ? " on" : "")} onClick={() => setDayFilter(d.id)}>{d.label}</button>)}</div>
+          {groups.length === 0 && <Empty text="No orders in this range." />}
+          {groups.map((g) => (
+            <div key={g.label}>
+              <div className="hz-daysep"><Calendar size={12} />{g.label}<span className="hz-daysep-n">{g.items.length} order{g.items.length > 1 ? "s" : ""}</span></div>
+              <div className="hz-stack">{g.items.map((o) => { const T = typeMeta(o); const del = o.type === "delivery"; return (
             <div className={"hz-mrow" + (flashing(ctx, o.id) ? " flash" : "") + (o.status === "new" ? " isnew" : "")} key={o.id}>
               <div className="hz-mhead"><span className="hz-tq"><Hash size={12} />{o.q}</span><Badge s={o.status} sm /><BranchTag b={o.branch} />{ACTIVE(o.status) && <span className="hz-qpos">Q#{ctx.queue[o.id]}</span>}{(o.source === "qr" || o.source === "online" || o.source === "car") && <span className="hz-srctag">{o.source}</span>}<span className={"hz-pay " + o.payment}>{o.payment === "paid" ? "Paid" : o.payment === "pending" ? "Verify payment" : "Unpaid"}</span></div>
               <div className="hz-mmeta"><span><T.icon size={12} />{T.label}</span><span><User size={12} />{o.customer}</span><span>{del ? <Bike size={12} /> : <Users size={12} />}{o.waiter}</span><span><Clock size={12} />{clock(o.createdAt)}</span></div>
@@ -1615,8 +1641,9 @@ function ManagerOps({ ctx, branch, onPrint }) {
                     <button className="hz-mini" title="Not received — switch to cash" onClick={() => ctx.setUnpaid(o.id)}><AlertTriangle size={13} /></button>
                   </>}
                   <button className="hz-mini danger" onClick={() => ctx.cancel(o.id)}><Trash2 size={13} /></button></div></div>
-            </div>); })}
-          </div>
+            </div>); })}</div>
+            </div>
+          ))}
         </div>
       </div>
     </>
@@ -2550,6 +2577,13 @@ const CSS = `
 .hz-closedpill{font-size:10px;font-weight:700;color:var(--rose);background:color-mix(in srgb,var(--rose) 14%,transparent);padding:3px 9px;border-radius:99px;text-transform:uppercase;}
 .hz-hbranch.closed{opacity:.72;}
 .hz-branchstatus{display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:12px 15px;margin-bottom:14px;}
+.hz-daychips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;}
+.hz-daychip{padding:6px 12px;border-radius:8px;font-size:12px;font-weight:700;background:var(--bg2);border:1px solid var(--border);color:var(--muted);cursor:pointer;transition:.15s;}
+.hz-daychip:hover{border-color:var(--ember);color:var(--text);}
+.hz-daychip.on{color:#fff;background:linear-gradient(135deg,var(--ember),var(--saffron));border-color:transparent;}
+.hz-daysep{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:16px 0 8px;padding-bottom:6px;border-bottom:1px dashed var(--border);}
+.hz-daysep:first-child{margin-top:0;}
+.hz-daysep-n{margin-left:auto;font-weight:600;text-transform:none;letter-spacing:0;color:var(--muted);opacity:.8;}
 .hz-bs-lbl{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;}
 .hz-bs-item{display:inline-flex;align-items:center;gap:8px;padding:6px 11px;border-radius:99px;background:var(--surface2);border:1px solid var(--border);}
 .hz-bs-item b{font-size:13px;}
