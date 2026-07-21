@@ -2868,24 +2868,30 @@ const CSS = `
 .hz-printroot.show-kitchen .hz-receipt.bill{opacity:.35;}
 .hz-printroot.show-bill .hz-receipt.kitchen{opacity:.35;}
 @media print {
-  /* Thermal receipt printers feed a continuous roll, not a fixed A4/Letter
-     page. Without this, the browser defaults to a full A4 page height and
-     feeds a large blank strip of paper after the (much shorter) receipt
-     before cutting. "auto" height lets the page end exactly where the
-     content ends. 80mm matches the common small receipt-printer width —
-     narrow 58mm printers still work fine since content is capped at 320px. */
+  /* Thermal POS printers feed a continuous roll, not a fixed A4/Letter page —
+     this whole block avoids anything that makes the browser think there's a
+     fixed-height "page" to fill or paginate against.
+     "auto" height (not a fixed mm value) lets the page end exactly where the
+     receipt's content ends, instead of guessing a length.                 */
   @page { size: 80mm auto; margin: 0; }
   html, body { margin: 0 !important; padding: 0 !important; height: auto !important; }
   body * { visibility: hidden !important; }
   .hz-printroot, .hz-printroot * { visibility: visible !important; }
-  .hz-printroot { position:absolute; inset:0; background:#fff !important; backdrop-filter:none; padding:0; display:block; height:auto !important; }
+  /* IMPORTANT: no position:absolute/inset:0 here — that stretches this box to
+     fill a full page's height (thinking in terms of a normal printer's fixed
+     page), which is exactly what was pushing content onto a 2nd page and/or
+     printing a trail of blank paper on a roll printer. Plain static flow
+     sized to its own content is what a continuous-roll printer needs. */
+  .hz-printroot { position:static !important; inset:auto !important; background:#fff !important; backdrop-filter:none; padding:0; margin:0; display:block; width:auto !important; height:auto !important; }
   .hz-print-toolbar, .hz-print-toolbar * { visibility: hidden !important; display:none !important; }
-  .hz-receipts { gap:0; }
-  /* No forced break after a single copy — that was pushing out an entire
-     extra blank page of paper even when printing just one ticket. A break
-     is only needed between the two copies when printing "both". */
-  .hz-receipt { width:100%; max-width:320px; border-radius:0; opacity:1 !important; page-break-after:avoid; page-break-inside:avoid; }
-  .hz-printroot.show-both .hz-receipt.kitchen { page-break-after:always; }
+  /* Stack receipts top-to-bottom (like they'll actually come off the roll)
+     instead of the on-screen side-by-side flex layout. */
+  .hz-receipts { display:block !important; gap:0; }
+  .hz-receipt { width:100%; max-width:320px; margin:0 auto; border-radius:0; opacity:1 !important; }
+  /* A page break is only meaningful when BOTH copies print in the same job —
+     it separates the kitchen ticket from the bill so they land as two
+     distinct cuts on the roll. A single copy needs no break at all. */
+  .hz-printroot.show-both .hz-receipt.kitchen { page-break-after:always; break-after:page; }
   .hz-printroot.show-kitchen .hz-receipt.bill { display:none !important; }
   .hz-printroot.show-bill .hz-receipt.kitchen { display:none !important; }
 }
