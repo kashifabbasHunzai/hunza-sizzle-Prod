@@ -60,6 +60,12 @@ const STAGE = {
 };
 const ACTIVE = (s) => s !== "completed";
 const READY_I = STAGES.indexOf("ready");
+/* What "ready" and "done" are called depends on how the order leaves the
+   kitchen — a dine-in table gets served, a takeaway gets collected, a car
+   gets brought out, a delivery goes through the rider's own steps. */
+const READY_LABEL = { dinein: "Ready to serve", takeaway: "Ready — please collect", carhop: "Ready for car", delivery: "Ready for rider" };
+const DONE_LABEL = { dinein: "Mark served", takeaway: "Mark collected", carhop: "Mark delivered to car" };
+const DONE_ICON = { dinein: MapPin, takeaway: ShoppingBag, carhop: Car };
 
 const ROLE_META = {
   admin:   { label: "Admin", icon: ShieldCheck, color: "#FF6B2C" },
@@ -1223,6 +1229,14 @@ function MenuBrowser({ cats, cat, setCat, q, setQ, shown, cart, add, sub }) {
    (for deliveries) the rider's progress plus the latest notification. */
 function Track({ o, ctx, onNew }) {
   const i = STAGES.indexOf(o.status); const pos = ctx.queue[o.id];
+  /* The generic STAGE labels ("Ready", "Completed") don't tell a customer
+     what actually happens next — this makes the timeline say what THEY
+     should expect for how their specific order type leaves the kitchen. */
+  const stageLabel = (s) => {
+    if (s === "ready") return o.type === "delivery" ? "Ready for rider" : o.type === "takeaway" ? "Ready — collect" : o.type === "carhop" ? "Ready" : "Ready to serve";
+    if (s === "completed") return o.type === "delivery" ? "Delivered" : o.type === "takeaway" ? "Collected" : o.type === "carhop" ? "Delivered" : "Served";
+    return STAGE[s].c;
+  };
   const readyMsg = o.type === "delivery" ? "Ready — your rider is about to pick it up." : o.type === "takeaway" ? "Ready — please collect it from the counter." : o.type === "carhop" ? `Ready — ${o.waiter} is bringing it to your car.` : `Ready — ${o.waiter} is bringing it to your table.`;
   const doneMsg = o.type === "delivery" ? "Delivered! Enjoy your meal." : o.type === "takeaway" ? "Picked up! Enjoy your meal." : "Delivered! Enjoy your meal.";
   const delSteps = [{ k: "pickedup", l: "Picked up" }, { k: "onway", l: "On the way" }, { k: "reached", l: "Reached" }, { k: "delivered", l: "Delivered" }];
@@ -1232,14 +1246,14 @@ function Track({ o, ctx, onNew }) {
     <div className="hz-wrap narrow">
       <Head title="Live Tracking" sub={`Order #${o.q} · ${branchName(o.branch)}`} />
       <div className={"hz-track" + (flashing(ctx, o.id) ? " flash" : "")}>
-        <div className="hz-track-hero"><div><div className="hz-th-q">Order #{o.q}</div><div className="hz-th-cur" style={{ color: STAGE[o.status].color }}>{STAGE[o.status].c}</div></div>
+        <div className="hz-track-hero"><div><div className="hz-th-q">Order #{o.q}</div><div className="hz-th-cur" style={{ color: STAGE[o.status].color }}>{stageLabel(o.status)}</div></div>
           <div className="hz-th-r"><div className="hz-th-big">{o.status === "completed" ? 0 : etaMins(o)}<small>min</small></div>{pos && <div className="hz-th-pos">Queue position {pos}</div>}</div></div>
         <div className="hz-asgn"><ChefHat size={13} />{o.type === "delivery" ? "Rider" : "Your waiter"}: <b>{o.waiter}</b></div>
         {o.custMsg && <div className="hz-custnotif"><Bell size={14} />{o.custMsg}</div>}
         <div className="hz-timeline">{STAGES.map((s, k) => { const done = STAGES.indexOf(s) < i, cur = STAGES.indexOf(s) === i;
           return (<div className={"hz-tl" + (done ? " done" : "") + (cur ? " cur" : "")} key={s}>
             <span className="hz-tl-dot" style={cur || done ? { background: STAGE[s].color, borderColor: STAGE[s].color } : {}}>{done ? <Check size={11} /> : cur ? <span className="hz-tl-live" /> : null}</span>
-            {k < STAGES.length - 1 && <span className="hz-tl-line" style={done ? { background: STAGE[s].color } : {}} />}<span className="hz-tl-lbl">{STAGE[s].c}</span></div>); })}</div>
+            {k < STAGES.length - 1 && <span className="hz-tl-line" style={done ? { background: STAGE[s].color } : {}} />}<span className="hz-tl-lbl">{stageLabel(s)}</span></div>); })}</div>
         {o.type === "delivery" && (o.status === "ready" || o.deliveryStage) && o.status !== "completed" && (
           <div className="hz-delrow">{delSteps.map((s, k) => <span key={s.k} className={"hz-delstep" + (delOrder.indexOf(s.k) <= delIdx ? " on" : "")}><Bike size={11} />{s.l}</span>)}</div>
         )}
@@ -1633,14 +1647,20 @@ function ManagerOps({ ctx, branch, onPrint }) {
               <div className="hz-mfoot"><b>{rs(grand(o))}</b>{ACTIVE(o.status) && <span className="hz-eta">ETA {etaMins(o)}m</span>}
                 <div className="hz-macts">
                   <button className="hz-printbtn" onClick={() => doPrint(o)}><Receipt size={13} />{o.status === "new" ? "Print" : "Re-print"}</button>
-                  {o.status === "preparing" && <button className="hz-mini" title="Mark ready" aria-label="Mark ready" onClick={() => ctx.markReady(o.id)}><Check size={13} /></button>}
+                  {o.status === "preparing" && <button className="hz-printbtn stage" title={READY_LABEL[o.type]} onClick={() => ctx.markReady(o.id)}><Check size={13} />{READY_LABEL[o.type] || "Mark ready"}</button>}
+                  {o.status === "ready" && o.type !== "delivery" && <button className="hz-printbtn stage" onClick={() => ctx.markServed(o.id)}>{DONE_ICON[o.type] ? React.createElement(DONE_ICON[o.type], { size: 13 }) : <Check size={13} />}{DONE_LABEL[o.type] || "Mark done"}</button>}
                   <button className={"hz-mini" + (o.priority ? " active" : "")} onClick={() => ctx.togglePriority(o.id)}><Star size={13} /></button>
                   {o.payment === "unpaid" && <button className="hz-mini" title="Mark paid — cash received" onClick={() => ctx.setPaid(o.id)}><Wallet size={13} /></button>}
                   {o.payment === "pending" && <>
                     <button className="hz-mini" title="Verify — online payment received" onClick={() => ctx.setPaid(o.id)}><ShieldCheck size={13} /></button>
                     <button className="hz-mini" title="Not received — switch to cash" onClick={() => ctx.setUnpaid(o.id)}><AlertTriangle size={13} /></button>
                   </>}
-                  <button className="hz-mini danger" onClick={() => ctx.cancel(o.id)}><Trash2 size={13} /></button></div></div>
+                  <button className="hz-mini danger" onClick={() => ctx.cancel(o.id)}><Trash2 size={13} /></button></div>
+              {/* Delivery orders don't have a single "mark done" click — they step through
+                  Picked up → On the way → Reached → Delivered, same controls the rider's
+                  own phone has, so admin/manager can also progress or cover for a rider. */}
+              {(o.status === "ready" || o.deliveryStage) && o.type === "delivery" && o.status !== "completed" && <div className="hz-mgr-rider"><RiderSteps o={o} ctx={ctx} /></div>}
+              </div>
             </div>); })}</div>
             </div>
           ))}
@@ -2797,6 +2817,9 @@ const CSS = `
 .hz-ridercall{display:inline-flex;align-items:center;gap:4px;margin-left:auto;color:var(--jade);font-weight:700;font-family:var(--fm);font-size:12px;text-decoration:none;}
 .hz-roletag{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;}
 .hz-printbtn{display:inline-flex;align-items:center;gap:5px;padding:7px 12px;border-radius:9px;font-size:12px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--ember),var(--saffron));}
+.hz-printbtn.stage{background:linear-gradient(135deg,var(--jade),#1FA88A);}
+.hz-mgr-rider{margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);}
+.hz-mgr-rider .hz-deliverbtn{padding:9px;font-size:12.5px;}
 .hz-printbtn:hover{filter:brightness(1.06);}
 .hz-mrow.isnew{border-color:var(--saffron);box-shadow:0 0 0 1px var(--saffron);}
 /* Dish photo preview under the menu form */
