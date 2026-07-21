@@ -6,8 +6,10 @@ import {
   CircleAlert, MapPin, CheckCircle2, Soup, UserPlus, KeyRound, Wallet,
   Lock, Package, AlertTriangle, PackagePlus, X, Search,
   ImagePlus, UtensilsCrossed, Truck, Bike, Home, Phone, CreditCard, Banknote,
-  Building2, Navigation, ShoppingCart, BarChart3, TrendingUp, Boxes, Calendar, Pencil, Info,
+  Building2, Navigation, ShoppingCart, BarChart3, TrendingUp, Boxes, Calendar, Pencil, Info, Wifi, WifiOff,
 } from "lucide-react";
+import { db, FIREBASE_READY } from "./firebase";
+import { doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
 
 /* ================================================================== */
 /*  HUNZA SIZZLE — multi-branch restaurant system + online ordering    */
@@ -283,8 +285,87 @@ export default function App() {
   const pulse = useRef({});
   const qref = useRef(QC);
   const rref = useRef(1);
+  const [online, setOnline] = useState(!FIREBASE_READY); // "synced" once first Firestore read lands
 
   useEffect(() => { const t = setInterval(() => setTick((x) => x + 1), 1000); return () => clearInterval(t); }, []);
+
+  /* ================================================================
+     CROSS-DEVICE SYNC (Firebase Firestore)
+     Without this, every phone/browser has its own private copy of
+     orders/staff/menu/etc. — a waiter's order would never show up on
+     the admin's phone. With Firestore, all devices read/write the
+     same two documents in real time:
+       hunza/orders → { list: [...orders] }
+       hunza/meta   → { users, menu, inventory, purchases, requests, branchOpen }
+     If src/firebase.js still has placeholder keys (FIREBASE_READY is
+     false), this whole block quietly does nothing and the app behaves
+     exactly like before — local-only demo data.                    */
+  const remoteOrdersRef = useRef(null);
+  const remoteMetaRef = useRef(null);
+
+  // Seed Firestore once (first device ever to connect) so every later
+  // device — instead of generating its own random demo history — reads
+  // the same shared starting data.
+  useEffect(() => {
+    if (!FIREBASE_READY) return;
+    (async () => {
+      try {
+        const oRef = doc(db, "hunza", "orders");
+        const oSnap = await getDoc(oRef);
+        if (!oSnap.exists()) await setDoc(oRef, { list: [...HISTORY, ...seed] });
+        const mRef = doc(db, "hunza", "meta");
+        const mSnap = await getDoc(mRef);
+        if (!mSnap.exists()) await setDoc(mRef, { users: SEED_USERS, menu: SEED_MENU, inventory: SEED_INVENTORY, purchases: SEED_PURCHASES, requests: SEED_REQUESTS, branchOpen: { g91: true, i8: true } });
+      } catch (e) { console.error("Firestore seed failed", e); }
+    })();
+  }, []);
+
+  // Listen for changes made on OTHER devices and apply them here.
+  useEffect(() => {
+    if (!FIREBASE_READY) return;
+    const unsubOrders = onSnapshot(doc(db, "hunza", "orders"), (snap) => {
+      if (!snap.exists()) return;
+      const list = snap.data().list || [];
+      if (JSON.stringify(list) !== JSON.stringify(remoteOrdersRef.current)) { remoteOrdersRef.current = list; setOrders(list); }
+      setOnline(true);
+    }, (e) => { console.error("Firestore orders listen failed", e); });
+    const unsubMeta = onSnapshot(doc(db, "hunza", "meta"), (snap) => {
+      if (!snap.exists()) return;
+      const d = snap.data();
+      if (JSON.stringify(d) !== JSON.stringify(remoteMetaRef.current)) {
+        remoteMetaRef.current = d;
+        if (d.users) setUsers(d.users);
+        if (d.menu) setMenu(d.menu);
+        if (d.inventory) setInventory(d.inventory);
+        if (d.purchases) setPurchases(d.purchases);
+        if (d.requests) setRequests(d.requests);
+        if (d.branchOpen) setBranchOpen(d.branchOpen);
+      }
+      setOnline(true);
+    }, (e) => { console.error("Firestore meta listen failed", e); });
+    return () => { unsubOrders(); unsubMeta(); };
+  }, []);
+
+  // Push local changes (from any mutator like addOrder, addUser, restock…)
+  // up to Firestore, so other devices pick them up within ~1 second.
+  // The JSON-compare skips the write when this change is the one we just
+  // received *from* Firestore, so devices don't ping-pong writes at each other.
+  useEffect(() => {
+    if (!FIREBASE_READY) return;
+    const json = JSON.stringify(orders);
+    if (json === JSON.stringify(remoteOrdersRef.current)) return;
+    remoteOrdersRef.current = orders;
+    setDoc(doc(db, "hunza", "orders"), { list: orders }).catch((e) => console.error("Firestore orders write failed", e));
+  }, [orders]);
+
+  useEffect(() => {
+    if (!FIREBASE_READY) return;
+    const current = { users, menu, inventory, purchases, requests, branchOpen };
+    const json = JSON.stringify(current);
+    if (json === JSON.stringify(remoteMetaRef.current)) return;
+    remoteMetaRef.current = current;
+    setDoc(doc(db, "hunza", "meta"), current).catch((e) => console.error("Firestore meta write failed", e));
+  }, [users, menu, inventory, purchases, requests, branchOpen]);
 
   /* On load, work out where the visitor should land:
      - `?b=<branch>&t=<table>` (or `&m=car`) → a scanned QR: open the order page
@@ -532,6 +613,7 @@ export default function App() {
         </div>
         <div className="hz-ident"><span className="hz-ident-ic"><rm.icon size={14} /></span>{rm.label}</div>
         <div className="hz-bar-r">
+          {FIREBASE_READY && <span className={"hz-synctag" + (online ? " on" : "")} title={online ? "Synced live with all devices" : "Connecting…"}>{online ? <Wifi size={12} /> : <WifiOff size={12} />}{online ? "Live" : "Connecting…"}</span>}
           <NotifBell notifs={ctx.notifs} session={session} />
           {(session.role === "manager" || session.role === "admin") && (
             <button className={"hz-ctl" + (auto ? " on" : "")} onClick={() => setAuto((v) => !v)}>
@@ -1074,7 +1156,8 @@ function Track({ o, ctx, onNew }) {
 
 /* ===================== ORDER FLOW (public site) ================== */
 const ORDER_MODES = [
-  { id: "online", label: "Online Order", icon: Bike, soon: false },
+  { id: "online", label: "Delivery", icon: Bike, soon: false },
+  { id: "pickup", label: "Takeaway", icon: ShoppingBag, soon: false },
   { id: "car", label: "Curbside", icon: Car, soon: false },
 ];
 /* The whole customer ordering journey: menu → checkout → live tracking.
@@ -1084,8 +1167,7 @@ function OrderFlow({ ctx, dark, setDark, onHome, onStaff, entry }) {
   const qrEntry = !!entry;
   const entryKind = entry?.kind === "car" ? "car" : "dine";
   const dine = qrEntry && entryKind === "dine";
-  const [mode, setMode] = useState(qrEntry ? (entryKind === "car" ? "car" : "dine") : "online"); // online | car | dine
-  const [sub2, setSub2] = useState("delivery");       // delivery | pickup (online only)
+  const [mode, setMode] = useState(qrEntry ? (entryKind === "car" ? "car" : "dine") : "online"); // online (delivery) | pickup | car | dine
   const [branch, setBranch] = useState(qrEntry ? entry.branch : (ctx.branchOpen.g91 !== false ? "g91" : "i8"));
   const [step, setStep] = useState("menu");           // menu | checkout | track
   const [cart, setCart] = useState({});
@@ -1103,7 +1185,7 @@ function OrderFlow({ ctx, dark, setDark, onHome, onStaff, entry }) {
 
   const ctxLabel = dine ? `Dine-in${entry.table ? " · Table " + entry.table : ""} · ${branchName(branch)}`
     : (qrEntry && entryKind === "car") ? `Curbside (car) · ${branchName(branch)}`
-    : mode === "online" ? `${sub2 === "delivery" ? "Delivery" : "Pickup"} · ${branchName(branch)}` : `Curbside · ${branchName(branch)}`;
+    : mode === "online" ? `Delivery · ${branchName(branch)}` : mode === "pickup" ? `Takeaway · ${branchName(branch)}` : `Curbside · ${branchName(branch)}`;
 
   const bar = (
     <header className="hz-obar">
@@ -1119,7 +1201,7 @@ function OrderFlow({ ctx, dark, setDark, onHome, onStaff, entry }) {
     return <div className="hz-online">{bar}<div className="hz-owrap"><Track o={o} ctx={ctx} onNew={() => { setCart({}); setPlaced(null); setStep("menu"); }} /></div></div>;
   }
   if (step === "checkout") {
-    return <div className="hz-online">{bar}<div className="hz-owrap"><OrderCheckout ctx={ctx} mode={mode} sub2={sub2} branch={branch} table={dine ? entry.table : ""} spotPrefill={qrEntry && entryKind === "car" ? entry.spot : ""} items={items} sum={sum} onBack={() => setStep("menu")} onPlaced={(o) => { setPlaced(o); setStep("track"); }} /></div></div>;
+    return <div className="hz-online">{bar}<div className="hz-owrap"><OrderCheckout ctx={ctx} mode={mode} branch={branch} table={dine ? entry.table : ""} spotPrefill={qrEntry && entryKind === "car" ? entry.spot : ""} items={items} sum={sum} onBack={() => setStep("menu")} onPlaced={(o) => { setPlaced(o); setStep("track"); }} /></div></div>;
   }
 
   return (
@@ -1141,16 +1223,11 @@ function OrderFlow({ ctx, dark, setDark, onHome, onStaff, entry }) {
         )}
 
         <div className="hz-ctxbar">
-          <span className="hz-ctxchip">{dine ? <Store size={14} /> : mode === "online" ? (sub2 === "delivery" ? <Bike size={14} /> : <ShoppingBag size={14} />) : <Car size={14} />}{ctxLabel}</span>
+          <span className="hz-ctxchip">{dine ? <Store size={14} /> : mode === "online" ? <Bike size={14} /> : mode === "pickup" ? <ShoppingBag size={14} /> : <Car size={14} />}{ctxLabel}</span>
           {!qrEntry && <button className="hz-ctxchange" onClick={() => setSetupOpen((v) => !v)}>{setupOpen ? "Done" : "Change"}<ChevronRight size={13} style={{ transform: setupOpen ? "rotate(90deg)" : "none", transition: ".2s" }} /></button>}
         </div>
         {!qrEntry && setupOpen && (
           <div className="hz-setup">
-            {mode === "online" && (
-              <div className="hz-setup-row"><span className="hz-setup-l">Type</span>
-                <div className="hz-segt sm" style={{ margin: 0, flex: 1 }}><button className={sub2 === "delivery" ? "on" : ""} onClick={() => setSub2("delivery")}>Delivery</button><button className={sub2 === "pickup" ? "on" : ""} onClick={() => setSub2("pickup")}>Pickup</button></div>
-              </div>
-            )}
             <div className="hz-setup-row"><span className="hz-setup-l">Branch</span>
               <div className="hz-segt sm" style={{ margin: 0, flex: 1 }}>{BRANCHES.map((b) => { const op = ctx.branchOpen[b.id] !== false; return <button key={b.id} className={branch === b.id ? "on" : ""} disabled={!op} onClick={() => setBranch(b.id)}>{b.name}{!op ? " (closed)" : ""}</button>; })}</div>
             </div>
@@ -1168,9 +1245,10 @@ function OrderFlow({ ctx, dark, setDark, onHome, onStaff, entry }) {
 /* Checkout. Collects the details each order type needs, applies the delivery
    fee and (I-8 only) sales tax, then creates the order.
    NOTE: in production these totals must be recalculated on the server. */
-function OrderCheckout({ ctx, mode, sub2, branch, table, spotPrefill, items, sum, onBack, onPlaced }) {
+function OrderCheckout({ ctx, mode, branch, table, spotPrefill, items, sum, onBack, onPlaced }) {
   const dine = mode === "dine";
-  const delivery = mode === "online" && sub2 === "delivery";
+  const delivery = mode === "online";
+  const pickup = mode === "pickup";
   const [name, setName] = useState(""); const [phone, setPhone] = useState(""); const [address, setAddress] = useState("");
   const [vehicle, setVehicle] = useState(""); const [spot, setSpot] = useState(spotPrefill || ""); const [notes, setNotes] = useState("");
   const [pay, setPay] = useState("cod"); const [err, setErr] = useState("");
@@ -1180,7 +1258,7 @@ function OrderCheckout({ ctx, mode, sub2, branch, table, spotPrefill, items, sum
   const payable = sum + fee + tax;
   const place = () => {
     if (!name.trim()) { setErr("Please enter your name."); return; }
-    if (mode === "online" && phone.trim().length < 7) { setErr("Please enter a valid phone number."); return; }
+    if ((delivery || pickup) && phone.trim().length < 7) { setErr("Please enter a valid phone number."); return; }
     if (delivery && !address.trim()) { setErr("A delivery address is required."); return; }
     if (mode === "car" && (!vehicle.trim() || !spot.trim())) { setErr("Please enter your vehicle number and parking spot."); return; }
     const money = { fee, tax, taxRate: tRate, payMethod: pay };
@@ -1198,7 +1276,7 @@ function OrderCheckout({ ctx, mode, sub2, branch, table, spotPrefill, items, sum
     }
     onPlaced(ctx.addOrder(partial));
   };
-  const title = dine ? `Dine-in${table ? " · Table " + table : ""}` : mode === "car" ? "Curbside" : delivery ? "Delivery" : "Pickup";
+  const title = dine ? `Dine-in${table ? " · Table " + table : ""}` : mode === "car" ? "Curbside" : delivery ? "Delivery" : "Takeaway";
   return (
     <div className="hz-wrap narrow">
       <Head title="Checkout" sub={`${title} · ${branchName(branch)}`} right={<InfoTip label="How your order is handled">Your order goes to the team member with the lightest workload at that branch — a rider for deliveries, otherwise a waiter.</InfoTip>} />
@@ -1211,7 +1289,7 @@ function OrderCheckout({ ctx, mode, sub2, branch, table, spotPrefill, items, sum
       </div>
       <div className="hz-form">
         <label><span><User size={12} /> Name</span><input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" /></label>
-        {mode === "online" && <label><span><Phone size={12} /> Phone</span><input value={phone} onChange={(e) => setPhone(e.target.value.replace(/[^\d-]/g, ""))} placeholder="03xx-xxxxxxx" /></label>}
+        {(delivery || pickup) && <label><span><Phone size={12} /> Phone</span><input value={phone} onChange={(e) => setPhone(e.target.value.replace(/[^\d-]/g, ""))} placeholder="03xx-xxxxxxx" /></label>}
         {delivery && <label><span><Home size={12} /> Delivery address</span><input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="House, street, sector" /></label>}
         {mode === "car" && <div className="hz-row2"><label><span><Car size={12} /> Vehicle</span><input value={vehicle} onChange={(e) => setVehicle(e.target.value)} placeholder="ABC-123" /></label><label><span><MapPin size={12} /> Parking spot</span><input value={spot} onChange={(e) => setSpot(e.target.value)} placeholder="P5" /></label></div>}
         {dine && <label><span><Soup size={12} /> Notes (optional)</span><input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="No spicy, extra sauce…" /></label>}
@@ -2024,6 +2102,8 @@ const CSS = `
 .hz-ctl{display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border-radius:10px;font-size:12.5px;font-weight:600;background:var(--surface);border:1px solid var(--border);color:var(--text);transition:.15s;}
 .hz-ctl:hover{border-color:var(--ember);}
 .hz-ctl.on{color:#fff;background:linear-gradient(135deg,var(--ember),var(--saffron));border-color:transparent;}
+.hz-synctag{display:inline-flex;align-items:center;gap:5px;padding:6px 10px;border-radius:10px;font-size:11px;font-weight:700;background:var(--surface);border:1px solid var(--border);color:var(--danger,#FF5470);}
+.hz-synctag.on{color:#29D3A6;border-color:#29D3A633;background:#29D3A61a;}
 .hz-icbtn{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;background:var(--surface);border:1px solid var(--border);color:var(--text);transition:transform .14s,border-color .15s;}
 .hz-icbtn:active{transform:scale(.9);}
 .hz-bellwrap{position:relative;}
