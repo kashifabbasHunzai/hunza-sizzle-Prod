@@ -38,19 +38,33 @@ const dayStart = (ts) => { const d = new Date(ts); d.setHours(0, 0, 0, 0); retur
    localStorage. Kept for 30 days, or until the customer clears it themselves. */
 const MY_ORDERS_KEY = "hz_my_orders";
 const MY_ORDERS_TTL = 30 * DAY;
-function loadMyOrderIds() {
+function loadMyOrders() {
   try {
     const raw = JSON.parse(localStorage.getItem(MY_ORDERS_KEY) || "[]");
     const fresh = raw.filter((r) => now() - r.at < MY_ORDERS_TTL);
     if (fresh.length !== raw.length) localStorage.setItem(MY_ORDERS_KEY, JSON.stringify(fresh));
-    return fresh.map((r) => r.id);
+    return fresh; // [{ id, at, status }]
   } catch { return []; }
 }
-function rememberMyOrder(id) {
+function loadMyOrderIds() { return loadMyOrders().map((r) => r.id); }
+/* Whether this browser has an order that (as of the last time we heard)
+   wasn't finished yet — used on app load, before Firestore has synced
+   anything, to decide whether to jump straight into the order flow. */
+function hasActiveMyOrder() { return loadMyOrders().some((r) => r.status !== "completed"); }
+function rememberMyOrder(id, status) {
   try {
     const raw = JSON.parse(localStorage.getItem(MY_ORDERS_KEY) || "[]");
-    const next = [{ id, at: now() }, ...raw.filter((r) => r.id !== id)].slice(0, 40);
+    const next = [{ id, at: now(), status: status || "new" }, ...raw.filter((r) => r.id !== id)].slice(0, 40);
     localStorage.setItem(MY_ORDERS_KEY, JSON.stringify(next));
+  } catch {}
+}
+/* Keeps the cached status current as an order moves through its stages, so
+   the "was it still active?" check above stays accurate on the next visit. */
+function updateMyOrderStatus(id, status) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(MY_ORDERS_KEY) || "[]");
+    if (!raw.some((r) => r.id === id)) return;
+    localStorage.setItem(MY_ORDERS_KEY, JSON.stringify(raw.map((r) => r.id === id ? { ...r, status } : r)));
   } catch {}
 }
 function clearMyOrders() { try { localStorage.removeItem(MY_ORDERS_KEY); } catch {} }
@@ -435,7 +449,12 @@ export default function App() {
       // Strip any trailing slash so "/admin" and "/admin/" both match.
       const path = window.location.pathname.replace(/\/+$/, "").toLowerCase();
       const isStaffPath = STAFF_PATHS.includes(path);
-      if (isStaffPath || p.get("staff") === "1" || window.location.hash.toLowerCase() === "#staff") setPage("staff");
+      if (isStaffPath || p.get("staff") === "1" || window.location.hash.toLowerCase() === "#staff") { setPage("staff"); return; }
+      // A hard refresh remounts the whole app, resetting `page` back to
+      // "home" — if this browser has an order still in progress, jump
+      // straight into the order flow so it can resume tracking it (the
+      // actual resume-to-Track happens inside OrderFlow once orders sync).
+      if (hasActiveMyOrder()) setPage("order");
     } catch (e) { /* sandboxed preview — window may be unavailable */ }
   }, []);
 
@@ -1276,6 +1295,9 @@ function MyOrders({ ctx, onOpen, onBack }) {
 
 function Track({ o, ctx, onNew }) {
   const i = STAGES.indexOf(o.status); const pos = ctx.queue[o.id];
+  // Keeps the local "was this order still active?" cache accurate as status
+  // changes live, so a later refresh knows correctly whether to resume it.
+  useEffect(() => { updateMyOrderStatus(o.id, o.status); }, [o.id, o.status]);
   /* The generic STAGE labels ("Ready", "Completed") don't tell a customer
      what actually happens next — this makes the timeline say what THEY
      should expect for how their specific order type leaves the kitchen. */
@@ -1338,11 +1360,12 @@ function OrderFlow({ ctx, dark, setDark, onHome, onStaff, entry }) {
      yet, jump straight back to tracking it instead of losing it and showing
      the menu again. Runs once, as soon as synced orders are available. */
   useEffect(() => {
-    if (resumedRef.current || qrEntry || step !== "menu") return;
+    if (resumedRef.current || step !== "menu") return;
     const ids = loadMyOrderIds();
     if (!ids.length) return;
     const active = ids.map((id) => ctx.orders.find((x) => x.id === id)).find((o) => o && o.status !== "completed");
-    if (active) { resumedRef.current = true; setPlaced(active); setStep("track"); }
+    if (active) { resumedRef.current = true; updateMyOrderStatus(active.id, active.status); setPlaced(active); setStep("track"); }
+    else if (ctx.orders.length) resumedRef.current = true; // orders have synced and none are active — stop checking
   }, [ctx.orders]);
 
   const add = (it) => setCart((c) => ({ ...c, [it.name]: { ...it, qty: (c[it.name]?.qty || 0) + 1 } }));
@@ -1361,7 +1384,7 @@ function OrderFlow({ ctx, dark, setDark, onHome, onStaff, entry }) {
     <header className="hz-obar">
       <button className="hz-oback" onClick={step === "menu" ? onHome : () => setStep("menu")}><ChevronLeft size={18} /></button>
       <div className="hz-brand"><div className="hz-logo"><HunzaLogo size={30} compact /></div><div><div className="hz-bn">De-Hunza <span>Sizzle</span></div><div className="hz-bs">{qrEntry ? (entryKind === "car" ? "Curbside" : "Dine-in") : "Order"}</div></div></div>
-      {!qrEntry && <button className="hz-ohome" onClick={() => setStep("history")}><ClipboardList size={14} />My Orders</button>}
+      <button className="hz-ohome" onClick={() => setStep("history")}><ClipboardList size={14} />My Orders</button>
       <button className="hz-ohome" onClick={onHome}><Home size={14} />{qrEntry ? "Exit" : "Home"}</button>
       <button className="hz-icbtn" onClick={() => setDark((v) => !v)}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button>
     </header>
@@ -1375,7 +1398,7 @@ function OrderFlow({ ctx, dark, setDark, onHome, onStaff, entry }) {
     return <div className="hz-online">{bar}<div className="hz-owrap"><Track o={o} ctx={ctx} onNew={() => { setCart({}); setPlaced(null); setStep("menu"); }} /></div></div>;
   }
   if (step === "checkout") {
-    return <div className="hz-online">{bar}<div className="hz-owrap"><OrderCheckout ctx={ctx} mode={mode} branch={branch} table={dine ? entry.table : ""} spotPrefill={qrEntry && entryKind === "car" ? entry.spot : ""} items={items} sum={sum} onBack={() => setStep("menu")} onPlaced={(o) => { if (!qrEntry) rememberMyOrder(o.id); setPlaced(o); setStep("track"); }} /></div></div>;
+    return <div className="hz-online">{bar}<div className="hz-owrap"><OrderCheckout ctx={ctx} mode={mode} branch={branch} table={dine ? entry.table : ""} spotPrefill={qrEntry && entryKind === "car" ? entry.spot : ""} items={items} sum={sum} onBack={() => setStep("menu")} onPlaced={(o) => { rememberMyOrder(o.id, o.status); setPlaced(o); setStep("track"); }} /></div></div>;
   }
 
   return (
@@ -1633,6 +1656,49 @@ function DashCard({ icon: Icon, label, val, sub, c, big }) {
     </div>
   );
 }
+/* One icon per stage the customer's own tracking screen shows for this
+   order type — clicking a step here updates the order's status live, which
+   the customer sees update on their screen within a second or two (same
+   Firestore sync used everywhere else). Only the immediate next stage is
+   clickable at a time, so staff can't accidentally skip a step or send a
+   confusing "delivered" message before the rider actually picked it up. */
+function StageIcons({ o, ctx }) {
+  const del = o.type === "delivery";
+  const steps = del
+    ? [
+        { key: "new", label: "Received", icon: ClipboardList },
+        { key: "preparing", label: "Preparing", icon: ChefHat, action: () => ctx.markPreparing(o.id) },
+        { key: "ready", label: "Ready for rider", icon: Check, action: () => ctx.markReady(o.id) },
+        { key: "pickedup", label: "Picked up", icon: Bike, action: () => ctx.riderStep(o.id, "pickedup") },
+        { key: "onway", label: "On the way", icon: Navigation, action: () => ctx.riderStep(o.id, "onway") },
+        { key: "reached", label: "Reached", icon: MapPin, action: () => ctx.riderStep(o.id, "reached") },
+        { key: "delivered", label: "Delivered", icon: CheckCircle2, action: () => ctx.riderStep(o.id, "delivered") },
+      ]
+    : [
+        { key: "new", label: "Received", icon: ClipboardList },
+        { key: "preparing", label: "Preparing", icon: ChefHat, action: () => ctx.markPreparing(o.id) },
+        { key: "ready", label: READY_LABEL[o.type] || "Ready", icon: Check, action: () => ctx.markReady(o.id) },
+        { key: "done", label: DONE_LABEL[o.type] || "Done", icon: DONE_ICON[o.type] || CheckCircle2, action: () => ctx.markServed(o.id) },
+      ];
+  const curIdx = del
+    ? (o.status === "completed" ? steps.length - 1 : o.deliveryStage ? steps.findIndex((s) => s.key === o.deliveryStage) : STAGES.indexOf(o.status))
+    : (o.status === "completed" ? steps.length - 1 : STAGES.indexOf(o.status));
+  return (
+    <div className="hz-stageicons">
+      {steps.map((s, idx) => {
+        const done = idx < curIdx, cur = idx === curIdx, clickable = !!s.action && idx === curIdx + 1;
+        return (
+          <React.Fragment key={s.key}>
+            {idx > 0 && <span className={"hz-stageline" + (idx <= curIdx ? " done" : "")} />}
+            <button type="button" disabled={!clickable} title={s.label} aria-label={s.label}
+              className={"hz-stageicon" + (done ? " done" : "") + (cur ? " cur" : "") + (clickable ? " clickable" : "")}
+              onClick={() => clickable && s.action()}><s.icon size={13} /></button>
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
+}
 /* Live operations: branch open/closed switches, team workload, and the order
    list where staff print tickets and mark orders ready. */
 function ManagerOps({ ctx, branch, onPrint }) {
@@ -1710,8 +1776,6 @@ function ManagerOps({ ctx, branch, onPrint }) {
               <div className="hz-mfoot"><b>{rs(grand(o))}</b>{ACTIVE(o.status) && <span className="hz-eta">ETA {etaMins(o)}m</span>}
                 <div className="hz-macts">
                   <button className="hz-printbtn" onClick={() => doPrint(o)}><Receipt size={13} />{o.status === "new" ? "Print" : "Re-print"}</button>
-                  {o.status === "preparing" && <button className="hz-printbtn stage" title={READY_LABEL[o.type]} onClick={() => ctx.markReady(o.id)}><Check size={13} />{READY_LABEL[o.type] || "Mark ready"}</button>}
-                  {o.status === "ready" && o.type !== "delivery" && <button className="hz-printbtn stage" onClick={() => ctx.markServed(o.id)}>{DONE_ICON[o.type] ? React.createElement(DONE_ICON[o.type], { size: 13 }) : <Check size={13} />}{DONE_LABEL[o.type] || "Mark done"}</button>}
                   <button className={"hz-mini" + (o.priority ? " active" : "")} onClick={() => ctx.togglePriority(o.id)}><Star size={13} /></button>
                   {o.payment === "unpaid" && <button className="hz-mini" title="Mark paid — cash received" onClick={() => ctx.setPaid(o.id)}><Wallet size={13} /></button>}
                   {o.payment === "pending" && <>
@@ -1719,10 +1783,9 @@ function ManagerOps({ ctx, branch, onPrint }) {
                     <button className="hz-mini" title="Not received — switch to cash" onClick={() => ctx.setUnpaid(o.id)}><AlertTriangle size={13} /></button>
                   </>}
                   <button className="hz-mini danger" onClick={() => ctx.cancel(o.id)}><Trash2 size={13} /></button></div>
-              {/* Delivery orders don't have a single "mark done" click — they step through
-                  Picked up → On the way → Reached → Delivered, same controls the rider's
-                  own phone has, so admin/manager can also progress or cover for a rider. */}
-              {(o.status === "ready" || o.deliveryStage) && o.type === "delivery" && o.status !== "completed" && <div className="hz-mgr-rider"><RiderSteps o={o} ctx={ctx} /></div>}
+              {/* Every stage the customer's own tracking screen shows, as clickable icons —
+                  tapping one updates their screen live. */}
+              {o.status !== "completed" && <StageIcons o={o} ctx={ctx} />}
               </div>
             </div>); })}</div>
             </div>
@@ -2885,8 +2948,15 @@ const CSS = `
 .hz-roletag{font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;}
 .hz-printbtn{display:inline-flex;align-items:center;gap:5px;padding:7px 12px;border-radius:9px;font-size:12px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--ember),var(--saffron));}
 .hz-printbtn.stage{background:linear-gradient(135deg,var(--jade),#1FA88A);}
-.hz-mgr-rider{margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);}
-.hz-mgr-rider .hz-deliverbtn{padding:9px;font-size:12.5px;}
+.hz-stageicons{display:flex;align-items:center;margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);overflow-x:auto;}
+.hz-stageicon{flex-shrink:0;width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:var(--surface2);border:1.5px solid var(--border);color:var(--muted);transition:.15s;}
+.hz-stageicon.done{background:color-mix(in srgb,var(--jade) 18%,transparent);border-color:var(--jade);color:var(--jade);}
+.hz-stageicon.cur{background:var(--jade);border-color:var(--jade);color:#0c0a08;box-shadow:0 0 0 3px color-mix(in srgb,var(--jade) 25%,transparent);}
+.hz-stageicon.clickable{cursor:pointer;}
+.hz-stageicon.clickable:hover{transform:scale(1.12);border-color:var(--ember);}
+.hz-stageicon:disabled{cursor:default;}
+.hz-stageline{flex:1;min-width:8px;height:2px;background:var(--border);margin:0 -1px;}
+.hz-stageline.done{background:var(--jade);}
 .hz-printbtn:hover{filter:brightness(1.06);}
 .hz-mrow.isnew{border-color:var(--saffron);box-shadow:0 0 0 1px var(--saffron);}
 /* Dish photo preview under the menu form */
