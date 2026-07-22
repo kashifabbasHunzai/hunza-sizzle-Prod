@@ -1307,7 +1307,7 @@ function Track({ o, ctx, onNew }) {
     return STAGE[s].c;
   };
   const readyMsg = o.type === "delivery" ? "Ready — your rider is about to pick it up." : o.type === "takeaway" ? "Ready — please collect it from the counter." : o.type === "carhop" ? `Ready — ${o.waiter} is bringing it to your car.` : `Ready — ${o.waiter} is bringing it to your table.`;
-  const doneMsg = o.type === "delivery" ? "Delivered! Enjoy your meal." : o.type === "takeaway" ? "Picked up! Enjoy your meal." : "Delivered! Enjoy your meal.";
+  const doneMsg = o.type === "delivery" ? "Delivered — enjoy your meal!" : o.type === "takeaway" ? "Picked up — enjoy your meal!" : o.type === "carhop" ? "Brought out to your car — enjoy your meal!" : "Your meal has been served — please enjoy!";
   const delSteps = [{ k: "pickedup", l: "Picked up" }, { k: "onway", l: "On the way" }, { k: "reached", l: "Reached" }, { k: "delivered", l: "Delivered" }];
   const delOrder = ["", "pickedup", "onway", "reached", "delivered"];
   const delIdx = delOrder.indexOf(o.deliveryStage || "");
