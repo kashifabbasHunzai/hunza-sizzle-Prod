@@ -1328,6 +1328,19 @@ function Track({ o, ctx, onNew }) {
         )}
         {o.status === "ready" && !o.deliveryStage && <div className="hz-cnote ready">{readyMsg}</div>}
         {o.status === "completed" && <div className="hz-cnote done"><CheckCircle2 size={15} />{doneMsg}</div>}
+        <div className="hz-track-bill">
+          <div className="hz-track-bill-h">Your order</div>
+          <div className="hz-track-items">{o.items.map((it) => (
+            <div className="hz-track-item" key={it.name}><span>{it.qty}× {it.name}</span><span>{rs(it.price * it.qty)}</span></div>
+          ))}</div>
+          <div className="hz-track-sums">
+            <div className="hz-track-sumrow"><span>Subtotal</span><span>{rs(total(o))}</span></div>
+            {o.fee > 0 && <div className="hz-track-sumrow"><span>Delivery fee</span><span>{rs(o.fee)}</span></div>}
+            {o.tax > 0 && <div className="hz-track-sumrow"><span>Tax{o.taxRate ? ` (${(o.taxRate * 100).toFixed(0)}%)` : ""}</span><span>{rs(o.tax)}</span></div>}
+            <div className="hz-track-sumrow total"><span>Total</span><span>{rs(grand(o))}</span></div>
+          </div>
+          <div className={"hz-pay bare " + o.payment}>{o.payment === "paid" ? "Paid" : o.payment === "pending" ? "Payment pending verification" : "Pay on " + (o.type === "delivery" ? "delivery" : "collection")}</div>
+        </div>
       </div>
       <button className="hz-back wide center" onClick={onNew}>+ Place another order</button>
     </div>
@@ -2966,6 +2979,17 @@ const CSS = `
 
 /* Customer live-tracking card — this had no styling at all. */
 .hz-track{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:18px;box-shadow:0 14px 34px -22px rgba(0,0,0,.5);}
+.hz-track-bill{margin-top:18px;padding-top:16px;border-top:1px dashed var(--border);}
+.hz-track-bill-h{font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:10px;}
+.hz-track-items{display:flex;flex-direction:column;gap:6px;margin-bottom:10px;}
+.hz-track-item{display:flex;justify-content:space-between;font-size:13px;color:var(--text);}
+.hz-track-item span:last-child{font-family:var(--fm);color:var(--muted);}
+.hz-track-sums{border-top:1px solid var(--border);padding-top:8px;display:flex;flex-direction:column;gap:5px;}
+.hz-track-sumrow{display:flex;justify-content:space-between;font-size:12.5px;color:var(--muted);}
+.hz-track-sumrow span:last-child{font-family:var(--fm);}
+.hz-track-sumrow.total{font-size:16px;font-weight:800;color:var(--text);margin-top:4px;padding-top:8px;border-top:1px solid var(--border);}
+.hz-track-sumrow.total span:last-child{color:var(--ember);}
+.hz-pay.bare{display:inline-flex;margin:12px 0 0;}
 .hz-track.flash{animation:hzFlash .9s ease;}
 .hz-track-hero{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding-bottom:14px;border-bottom:1px solid var(--border);margin-bottom:14px;}
 .hz-th-q{font-size:12px;color:var(--muted);font-weight:600;}
