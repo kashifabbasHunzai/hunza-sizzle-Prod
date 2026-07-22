@@ -31,6 +31,29 @@ const monthLong = (key) => { const [y, m] = key.split("-"); return MN[+m - 1] + 
 const monthsBetween = (fromTs, toTs) => { const out = []; const a = new Date(fromTs); a.setDate(1); const b = new Date(toTs || now()); b.setDate(1); let g = 0; while (a <= b && g < 60) { out.push(monthKey(a)); a.setMonth(a.getMonth() + 1); g++; } return out; };
 const DAY = 86400000;
 const dayStart = (ts) => { const d = new Date(ts); d.setHours(0, 0, 0, 0); return d.getTime(); };
+
+/* ===== Customer-side "my orders" memory =====
+   Customers don't log in, so the only way to remember "this browser placed
+   this order" across a refresh (or days later, to show order history) is
+   localStorage. Kept for 30 days, or until the customer clears it themselves. */
+const MY_ORDERS_KEY = "hz_my_orders";
+const MY_ORDERS_TTL = 30 * DAY;
+function loadMyOrderIds() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(MY_ORDERS_KEY) || "[]");
+    const fresh = raw.filter((r) => now() - r.at < MY_ORDERS_TTL);
+    if (fresh.length !== raw.length) localStorage.setItem(MY_ORDERS_KEY, JSON.stringify(fresh));
+    return fresh.map((r) => r.id);
+  } catch { return []; }
+}
+function rememberMyOrder(id) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(MY_ORDERS_KEY) || "[]");
+    const next = [{ id, at: now() }, ...raw.filter((r) => r.id !== id)].slice(0, 40);
+    localStorage.setItem(MY_ORDERS_KEY, JSON.stringify(next));
+  } catch {}
+}
+function clearMyOrders() { try { localStorage.removeItem(MY_ORDERS_KEY); } catch {} }
 const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const dayName = (ts) => WD[new Date(ts).getDay()];
 const dayNum = (ts) => new Date(ts).getDate();
@@ -902,7 +925,7 @@ const flashing = (ctx, id) => now() - (ctx.pulse[id] || 0) < 1100;
 function Badge({ s, sm }) { const m = STAGE[s]; return <span className={"hz-badge" + (sm ? " sm" : "")} style={{ color: m.color, background: m.color + "1e" }}>{m.k}</span>; }
 function BranchTag({ b }) { return <span className="hz-brtag"><Building2 size={10} />{branchName(b)}</span>; }
 function Head({ title, sub, right }) { return <div className="hz-head"><div><h1>{title}</h1><p>{sub}</p></div>{right}</div>; }
-function Empty({ text }) { return <div className="hz-emptybox"><CircleAlert size={18} />{text}</div>; }
+function Empty({ text, icon: Icon = CircleAlert }) { return <div className="hz-emptybox"><Icon size={18} />{text}</div>; }
 function Toasts({ toasts }) {
   return <div className="hz-toasts">{toasts.map((t) => (
     <div className="hz-toast" key={t.id}><span className="hz-toast-ic" style={{ background: t.color + "22", color: t.color }}><Bell size={14} /></span>{t.msg}</div>
@@ -1227,6 +1250,30 @@ function MenuBrowser({ cats, cat, setCat, q, setQ, shown, cart, add, sub }) {
 }
 /* Customer's live order tracking: status timeline, queue position, ETA, and
    (for deliveries) the rider's progress plus the latest notification. */
+/* Customer order history — sourced from this browser's localStorage list of
+   order ids, cross-referenced against the live synced orders so it always
+   shows current status, not a stale snapshot. */
+function MyOrders({ ctx, onOpen, onBack }) {
+  const [ids, setIds] = useState(() => loadMyOrderIds());
+  const list = ids.map((id) => ctx.orders.find((x) => x.id === id)).filter(Boolean).sort((a, b) => b.createdAt - a.createdAt);
+  const clear = () => { if (!confirm("Clear your order history on this device? This can't be undone.")) return; clearMyOrders(); setIds([]); };
+  return (
+    <div className="hz-wrap narrow">
+      <Head title="My Orders" sub={list.length ? `${list.length} order${list.length > 1 ? "s" : ""} on this device · kept 30 days` : "Orders you place will show up here"} />
+      {list.length === 0 && <Empty icon={ClipboardList} text="No past orders on this device yet." />}
+      <div className="hz-stack">{list.map((o) => { const T = typeMeta(o); return (
+        <button key={o.id} className="hz-myorder" onClick={() => onOpen(o)}>
+          <div className="hz-mhead"><span className="hz-tq"><Hash size={12} />{o.q}</span><Badge s={o.status} sm /><span className="hz-daysep-n" style={{ marginLeft: "auto" }}>{dayLabel(o.createdAt)} · {clock(o.createdAt)}</span></div>
+          <div className="hz-mmeta"><span><T.icon size={12} />{T.label}</span><span><Store size={12} />{branchName(o.branch)}</span></div>
+          <div className="hz-mitems">{o.items.map((i) => `${i.qty}× ${i.name}`).join(" · ")}</div>
+          <div className="hz-mfoot"><b>{rs(grand(o))}</b>{o.status !== "completed" && <span className="hz-eta">Tap to track <ArrowRight size={12} /></span>}</div>
+        </button>
+      ); })}</div>
+      {list.length > 0 && <button className="hz-clearhist" onClick={clear}><Trash2 size={13} />Clear my order history</button>}
+    </div>
+  );
+}
+
 function Track({ o, ctx, onNew }) {
   const i = STAGES.indexOf(o.status); const pos = ctx.queue[o.id];
   /* The generic STAGE labels ("Ready", "Completed") don't tell a customer
@@ -1280,11 +1327,23 @@ function OrderFlow({ ctx, dark, setDark, onHome, onStaff, entry }) {
   const dine = qrEntry && entryKind === "dine";
   const [mode, setMode] = useState(qrEntry ? (entryKind === "car" ? "car" : "dine") : "online"); // online (delivery) | pickup | car | dine
   const [branch, setBranch] = useState(qrEntry ? entry.branch : (ctx.branchOpen.g91 !== false ? "g91" : "i8"));
-  const [step, setStep] = useState("menu");           // menu | checkout | track
+  const [step, setStep] = useState("menu");           // menu | checkout | track | history
   const [cart, setCart] = useState({});
   const [placed, setPlaced] = useState(null);
   const [cat, setCat] = useState("All"); const [q, setQ] = useState("");
   const [setupOpen, setSetupOpen] = useState(false);
+  const resumedRef = useRef(false);
+
+  /* Refresh-persistence: if this browser placed an order that isn't finished
+     yet, jump straight back to tracking it instead of losing it and showing
+     the menu again. Runs once, as soon as synced orders are available. */
+  useEffect(() => {
+    if (resumedRef.current || qrEntry || step !== "menu") return;
+    const ids = loadMyOrderIds();
+    if (!ids.length) return;
+    const active = ids.map((id) => ctx.orders.find((x) => x.id === id)).find((o) => o && o.status !== "completed");
+    if (active) { resumedRef.current = true; setPlaced(active); setStep("track"); }
+  }, [ctx.orders]);
 
   const add = (it) => setCart((c) => ({ ...c, [it.name]: { ...it, qty: (c[it.name]?.qty || 0) + 1 } }));
   const sub = (n) => setCart((c) => { const x = (c[n]?.qty || 0) - 1; const m = { ...c }; if (x <= 0) delete m[n]; else m[n] = { ...m[n], qty: x }; return m; });
@@ -1302,17 +1361,21 @@ function OrderFlow({ ctx, dark, setDark, onHome, onStaff, entry }) {
     <header className="hz-obar">
       <button className="hz-oback" onClick={step === "menu" ? onHome : () => setStep("menu")}><ChevronLeft size={18} /></button>
       <div className="hz-brand"><div className="hz-logo"><HunzaLogo size={30} compact /></div><div><div className="hz-bn">De-Hunza <span>Sizzle</span></div><div className="hz-bs">{qrEntry ? (entryKind === "car" ? "Curbside" : "Dine-in") : "Order"}</div></div></div>
+      {!qrEntry && <button className="hz-ohome" onClick={() => setStep("history")}><ClipboardList size={14} />My Orders</button>}
       <button className="hz-ohome" onClick={onHome}><Home size={14} />{qrEntry ? "Exit" : "Home"}</button>
       <button className="hz-icbtn" onClick={() => setDark((v) => !v)}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button>
     </header>
   );
 
+  if (step === "history") {
+    return <div className="hz-online">{bar}<div className="hz-owrap"><MyOrders ctx={ctx} onOpen={(o) => { setPlaced(o); setStep("track"); }} onBack={() => setStep("menu")} /></div></div>;
+  }
   if (step === "track" && placed) {
     const o = ctx.orders.find((x) => x.id === placed.id) || placed;
     return <div className="hz-online">{bar}<div className="hz-owrap"><Track o={o} ctx={ctx} onNew={() => { setCart({}); setPlaced(null); setStep("menu"); }} /></div></div>;
   }
   if (step === "checkout") {
-    return <div className="hz-online">{bar}<div className="hz-owrap"><OrderCheckout ctx={ctx} mode={mode} branch={branch} table={dine ? entry.table : ""} spotPrefill={qrEntry && entryKind === "car" ? entry.spot : ""} items={items} sum={sum} onBack={() => setStep("menu")} onPlaced={(o) => { setPlaced(o); setStep("track"); }} /></div></div>;
+    return <div className="hz-online">{bar}<div className="hz-owrap"><OrderCheckout ctx={ctx} mode={mode} branch={branch} table={dine ? entry.table : ""} spotPrefill={qrEntry && entryKind === "car" ? entry.spot : ""} items={items} sum={sum} onBack={() => setStep("menu")} onPlaced={(o) => { if (!qrEntry) rememberMyOrder(o.id); setPlaced(o); setStep("track"); }} /></div></div>;
   }
 
   return (
@@ -2497,6 +2560,10 @@ const CSS = `
 .hz-wp-av{width:38px;height:38px;border-radius:11px;background:linear-gradient(135deg,var(--jade),var(--saffron));color:#0c0a08;display:grid;place-items:center;font-weight:800;font-family:var(--fd);flex-shrink:0;}
 .hz-wp-av.sm{width:32px;height:32px;font-size:14px;border-radius:9px;color:#fff;}
 .hz-mrow,.hz-billrow{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:12px;}
+.hz-myorder{display:block;width:100%;text-align:left;background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:12px;font:inherit;color:inherit;cursor:pointer;transition:.2s;}
+.hz-myorder:hover{border-color:color-mix(in srgb,var(--ember) 40%,var(--border));transform:translateY(-2px);}
+.hz-clearhist{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;margin-top:16px;padding:10px;border-radius:10px;font-size:12.5px;font-weight:600;color:var(--muted);background:transparent;border:1px dashed var(--border);}
+.hz-clearhist:hover{color:#FF5470;border-color:#FF547055;}
 .hz-mhead{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;}
 .hz-qpos{font-size:10.5px;color:var(--muted);font-family:var(--fm);}
 .hz-pay{margin-left:auto;font-size:10.5px;font-weight:700;padding:3px 8px;border-radius:6px;}
