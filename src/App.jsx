@@ -1105,7 +1105,12 @@ function Waiter({ ctx, me, branch }) {
           {mine.map((o) => {
             const T = typeMeta(o); const isReady = o.status === "ready";
             const dlabel = o.type === "carhop" ? "Deliver to CAR" : o.type === "takeaway" ? "Pickup counter" : "Serve at TABLE";
-            const dval = o.type === "carhop" ? `${o.vehicle} · ${o.spot}` : o.type === "takeaway" ? "—" : o.table;
+            /* Takeaway has no table or car, so show who is collecting it —
+               with their phone when the waiter took one, so the counter can
+               call the customer when the order is ready. */
+            const dval = o.type === "carhop" ? `${o.vehicle} · ${o.spot}`
+              : o.type === "takeaway" ? [o.customer, o.phone].filter(Boolean).join(" · ") || "Counter"
+              : o.table;
             return (
               <div className={"hz-worder" + (flashing(ctx, o.id) ? " flash" : "") + (isReady ? " ready" : "")} key={o.id}>
                 <div className="hz-trow"><span className="hz-tq"><Hash size={12} />{o.q}</span><Badge s={o.status} />{(o.source === "qr" || o.source === "online" || o.source === "car") && <span className="hz-srctag">{o.source} · auto</span>}</div>
@@ -1179,9 +1184,12 @@ function RiderSteps({ o, ctx }) {
     </>
   );
 }
+/* Counter order pad for a waiter. Three kinds of order can be taken here:
+   Table (dine-in), Car-hop (curbside) and Takeaway (customer collects). */
 function TakeOrder({ ctx, me, branch, onDone }) {
-  const [carhop, setCarhop] = useState(false);
+  const [mode, setMode] = useState("dinein");            // dinein | carhop | takeaway
   const [table, setTable] = useState(""); const [vehicle, setVehicle] = useState(""); const [spot, setSpot] = useState("");
+  const [phone, setPhone] = useState("");
   const [name, setName] = useState(""); const [notes, setNotes] = useState(""); const [cart, setCart] = useState({});
   const menu = menuForBranch(ctx.menu, branch);
   const add = (it) => setCart((c) => ({ ...c, [it.name]: { ...it, qty: (c[it.name]?.qty || 0) + 1 } }));
@@ -1189,10 +1197,19 @@ function TakeOrder({ ctx, me, branch, onDone }) {
   const items = Object.values(cart);
   return (
     <div className="hz-form">
-      <div className="hz-segt sm"><button className={!carhop ? "on" : ""} onClick={() => setCarhop(false)}>Table</button><button className={carhop ? "on" : ""} onClick={() => setCarhop(true)}>Car-hop</button></div>
-      {carhop ? <div className="hz-row2"><label>Vehicle<input value={vehicle} onChange={(e) => setVehicle(e.target.value)} placeholder="ABC-123" /></label><label>Spot<input value={spot} onChange={(e) => setSpot(e.target.value)} placeholder="P5" /></label></div>
-        : <label>Table<input value={table} onChange={(e) => setTable(e.target.value)} placeholder="01" /></label>}
-      <label>Customer (optional)<input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ahmed" /></label>
+      <div className="hz-segt sm wide">
+        <button className={mode === "dinein" ? "on" : ""} onClick={() => setMode("dinein")}>Table</button>
+        <button className={mode === "carhop" ? "on" : ""} onClick={() => setMode("carhop")}>Car-hop</button>
+        <button className={mode === "takeaway" ? "on" : ""} onClick={() => setMode("takeaway")}>Takeaway</button>
+      </div>
+      {mode === "carhop" && <div className="hz-row2"><label>Vehicle<input value={vehicle} onChange={(e) => setVehicle(e.target.value)} placeholder="ABC-123" /></label><label>Spot<input value={spot} onChange={(e) => setSpot(e.target.value)} placeholder="P5" /></label></div>}
+      {mode === "dinein" && <label>Table<input value={table} onChange={(e) => setTable(e.target.value)} placeholder="01" /></label>}
+      {mode === "takeaway"
+        ? <div className="hz-row2">
+            <label>Customer<input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ahmed" /></label>
+            <label>Phone (optional)<input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="0300-1234567" /></label>
+          </div>
+        : <label>Customer (optional)<input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ahmed" /></label>}
       <div className="hz-pickgrid">{menu.map((it) => (
         <button key={it.id} className={"hz-pick" + (cart[it.name] ? " on" : "")} onClick={() => add(it)}><span>{it.em}</span>{it.name}{cart[it.name] && <em>{cart[it.name].qty}</em>}</button>
       ))}</div>
@@ -1201,8 +1218,11 @@ function TakeOrder({ ctx, me, branch, onDone }) {
       ))}</div>}
       <label>Notes<input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="No spicy" /></label>
       <button className="hz-cta" disabled={!items.length} onClick={() => {
-        ctx.addOrder({ source: "waiter", branch, waiter: me, customer: name.trim() || "Guest", type: carhop ? "carhop" : "dinein",
-          table: carhop ? undefined : table || "—", vehicle: carhop ? vehicle || "—" : undefined, spot: carhop ? spot || "—" : undefined,
+        ctx.addOrder({ source: "waiter", branch, waiter: me, customer: name.trim() || "Guest", type: mode,
+          table: mode === "dinein" ? (table || "—") : undefined,
+          vehicle: mode === "carhop" ? (vehicle || "—") : undefined,
+          spot: mode === "carhop" ? (spot || "—") : undefined,
+          phone: mode === "takeaway" ? (phone.trim() || undefined) : undefined,
           notes, items: items.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) }).catch((e) => console.error("Order submit failed", e));
         onDone();
       }}>Submit order<ArrowRight size={15} /></button>
@@ -3095,33 +3115,69 @@ const CSS = `
 .hz-printroot.show-kitchen .hz-receipt.bill{opacity:.35;}
 .hz-printroot.show-bill .hz-receipt.kitchen{opacity:.35;}
 @media print {
-  /* Thermal POS printers feed a continuous roll, not a fixed A4/Letter page —
-     this whole block avoids anything that makes the browser think there's a
-     fixed-height "page" to fill or paginate against.
-     "auto" height (not a fixed mm value) lets the page end exactly where the
-     receipt's content ends, instead of guessing a length.                 */
+  /* ============ THERMAL RECEIPT PRINTING ============
+     Tuned for the Black Copper BC-86AC (80mm roll, 79.5mm paper,
+     ~72mm printable width, auto cutter).
+
+     Two things matter on a roll printer:
+     1. The "page" must size itself to the content (auto height), or the
+        browser assumes an A4 page and feeds a long trail of blank paper.
+     2. Everything must be PURE BLACK. Thermal heads are 1-bit — they cannot
+        print grey, so grey text comes out faint, broken or invisible. Every
+        muted colour used on screen is forced to #000 below.            */
   @page { size: 80mm auto; margin: 0; }
-  html, body { margin: 0 !important; padding: 0 !important; height: auto !important; }
+  html, body { margin:0 !important; padding:0 !important; height:auto !important; background:#fff !important; }
   body * { visibility: hidden !important; }
   .hz-printroot, .hz-printroot * { visibility: visible !important; }
-  /* IMPORTANT: no position:absolute/inset:0 here — that stretches this box to
-     fill a full page's height (thinking in terms of a normal printer's fixed
-     page), which is exactly what was pushing content onto a 2nd page and/or
-     printing a trail of blank paper on a roll printer. Plain static flow
-     sized to its own content is what a continuous-roll printer needs. */
-  .hz-printroot { position:static !important; inset:auto !important; background:#fff !important; backdrop-filter:none; padding:0; margin:0; display:block; width:auto !important; height:auto !important; }
-  .hz-print-toolbar, .hz-print-toolbar * { visibility: hidden !important; display:none !important; }
-  /* Stack receipts top-to-bottom (like they'll actually come off the roll)
-     instead of the on-screen side-by-side flex layout. */
-  .hz-receipts { display:block !important; gap:0; }
-  .hz-receipt { width:100%; max-width:320px; margin:0 auto; border-radius:0; opacity:1 !important; }
-  /* A page break is only meaningful when BOTH copies print in the same job —
-     it separates the kitchen ticket from the bill so they land as two
-     distinct cuts on the roll. A single copy needs no break at all. */
+  /* Static flow only — absolute positioning stretches the box to a full
+     page height and causes the blank-paper trail. */
+  .hz-printroot { position:static !important; inset:auto !important; background:#fff !important; backdrop-filter:none;
+                  padding:0 !important; margin:0 !important; display:block; width:auto !important; height:auto !important; }
+  .hz-print-toolbar, .hz-print-toolbar * { visibility:hidden !important; display:none !important; }
+  .hz-receipts { display:block !important; gap:0 !important; margin:0 !important; padding:0 !important; }
+
+  /* 72mm = the printable width of an 80mm head. Wider than this and the
+     right-hand column (prices) gets cut off. */
+  .hz-receipt {
+    width:72mm !important; max-width:72mm !important; box-sizing:border-box;
+    margin:0 !important; padding:2mm 2mm 3mm !important;
+    border-radius:0 !important; box-shadow:none !important; opacity:1 !important;
+    background:#fff !important; color:#000 !important;
+    font-family:"Arial Black","Helvetica Neue",Arial,sans-serif !important;
+    font-size:12.5px !important; line-height:1.42 !important;
+    font-weight:700 !important;                 /* thin strokes print faint */
+    -webkit-font-smoothing:none; text-rendering:geometricPrecision;
+    page-break-inside:auto; break-inside:auto;
+  }
+  /* Force every element to solid black — no greys, no opacity, no shadows. */
+  .hz-receipt * { color:#000 !important; opacity:1 !important; text-shadow:none !important; box-shadow:none !important;
+                  -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }
+  .hz-receipt .hz-rc-sub,
+  .hz-receipt .hz-rc-row span,
+  .hz-receipt .hz-rc-foot { color:#000 !important; font-weight:700 !important; }
+  /* Solid separators beat dashed/grey ones on a thermal head. */
+  .hz-receipt .hz-rc-hr { border-top:1px solid #000 !important; margin:2mm 0 !important; }
+  .hz-receipt .hz-rc-row.total { border-top:2px solid #000 !important; border-bottom:2px solid #000 !important;
+                                 font-size:15px !important; font-weight:900 !important; padding:1.5mm 0 !important; }
+  .hz-receipt .hz-rc-items tr.head td { border-bottom:1.5px solid #000 !important; font-weight:900 !important; }
+  .hz-receipt .hz-rc-title { font-size:17px !important; font-weight:900 !important; letter-spacing:.02em !important; }
+  .hz-receipt .hz-rc-title.big { font-size:20px !important; }
+  /* Inverted tag (white on black) — needs colour-adjust to survive printing. */
+  .hz-receipt .hz-rc-tag { background:#000 !important; color:#fff !important; border-radius:0 !important;
+                           font-weight:900 !important; padding:1mm 2mm !important; }
+  .hz-receipt .hz-rc-items td.amt { width:22mm !important; }
+  .hz-receipt .hz-rc-row b.addr { max-width:42mm !important; }
+
+  /* Only break between copies when BOTH are printed in one job, so the cutter
+     separates the kitchen ticket from the customer bill. A single copy gets no
+     break at all — that break is what wastes a whole extra receipt of paper. */
   .hz-printroot.show-both .hz-receipt.kitchen { page-break-after:always; break-after:page; }
   .hz-printroot.show-kitchen .hz-receipt.bill { display:none !important; }
   .hz-printroot.show-bill .hz-receipt.kitchen { display:none !important; }
+  /* Nothing after the last receipt — stops the extra blank feed. */
+  .hz-receipt:last-child { page-break-after:auto !important; break-after:auto !important; margin-bottom:0 !important; }
 }
+
 .hz-payedit{display:flex;gap:7px;align-items:center;margin-top:11px;flex-wrap:wrap;}
 .hz-payedit input{flex:1;min-width:120px;padding:9px 11px;border-radius:9px;background:var(--surface);border:1px solid var(--border);color:var(--text);font-size:13px;outline:none;}
 .hz-payedit input:focus{border-color:var(--ember);}
