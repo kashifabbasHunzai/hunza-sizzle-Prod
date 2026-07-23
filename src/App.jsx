@@ -2304,20 +2304,64 @@ function PrintModal({ order: o, onClose }) {
      which is what prints a blank leading page before the receipt shows up.
      Measuring the receipt's real height and injecting an EXACT millimetre
      value is far more reliably honoured than the "auto" keyword. */
+  /* Printing via the app's own window (hiding everything except the
+     receipt with CSS, and hoping @page sizing is honoured) has kept
+     producing multiple full A4 pages on this printer/driver combo — several
+     Windows POS drivers simply don't respect @page sizing or "auto" height
+     when the document also contains the full app stylesheet.
+     This opens a BRAND NEW, completely bare document — just the receipt's
+     markup and a small hand-written stylesheet, nothing else from the app —
+     computes its real height once rendered, and prints THAT window. There's
+     nothing else on the page for a confused driver to paginate against. */
   const printAs = (w) => {
-    setWhich(w);
-    setTimeout(() => {
+    setWhich(w); // keeps the on-screen preview toggle in sync too
+    // window.open must run synchronously, in direct response to the click —
+    // wrapping it in a timeout (like the previous version did) breaks the
+    // "user gesture" chain in several browsers and gets silently blocked as
+    // a popup. Both receipts already exist in the DOM at all times (only
+    // CSS toggles which one shows), so there's no need to wait on React
+    // re-rendering `which` before reading the markup.
+    const receiptsEl = printRootRef.current && printRootRef.current.querySelector(".hz-receipts");
+    const win = receiptsEl && window.open("", "_blank", "width=420,height=720");
+    if (!win || !receiptsEl) { setTimeout(() => window.print(), 60); return; } // popup blocked or DOM not ready — fall back
+    const pageBreak = w === "both" ? ".hz-receipt.kitchen{page-break-after:always;break-after:page;}" : "";
+    win.document.open();
+    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Order #${o.q}</title><style>
+      *{margin:0;padding:0;box-sizing:border-box;}
+      html,body{background:#fff;}
+      body{font-family:"Arial Black","Helvetica Neue",Arial,sans-serif;color:#000;}
+      .hz-receipts{display:block;}
+      .hz-receipt{width:72mm;max-width:72mm;margin:0 auto;padding:2mm 2mm 3mm;font-size:12.5px;line-height:1.42;font-weight:700;color:#000;}
+      .hz-rc-tag{display:inline-block;background:#000;color:#fff;font-weight:900;padding:1mm 2mm;margin-bottom:2mm;}
+      .hz-rc-title{font-size:17px;font-weight:900;letter-spacing:.02em;}
+      .hz-rc-title.big{font-size:20px;}
+      .hz-rc-sub{font-size:11px;margin:0 0 1mm;}
+      .hz-rc-hr{border-top:1px solid #000;margin:2mm 0;}
+      .hz-rc-row{display:flex;justify-content:space-between;gap:6px;margin:1mm 0;font-size:12px;}
+      .hz-rc-row b.addr{max-width:42mm;text-align:right;}
+      .hz-rc-row.total{border-top:2px solid #000;border-bottom:2px solid #000;font-size:15px;font-weight:900;padding:1.5mm 0;margin:2mm 0;}
+      .hz-rc-items{width:100%;border-collapse:collapse;margin:2mm 0;font-size:11.5px;}
+      .hz-rc-items td{padding:1mm 0;vertical-align:top;}
+      .hz-rc-items td.qty{white-space:nowrap;padding-right:4px;}
+      .hz-rc-items td.amt{width:22mm;text-align:right;}
+      .hz-rc-items tr.head td{border-bottom:1.5px solid #000;font-weight:900;}
+      .hz-rc-note{font-size:11px;font-style:italic;margin:1mm 0;}
+      .hz-rc-foot{text-align:center;font-size:10.5px;margin-top:2mm;}
+      ${w === "kitchen" ? ".hz-receipt.bill{display:none;}" : w === "bill" ? ".hz-receipt.kitchen{display:none;}" : pageBreak}
+    </style></head><body>${receiptsEl.outerHTML}</body></html>`);
+    win.document.close();
+    const runPrint = () => {
       try {
-        const el = printRootRef.current;
-        if (el) {
-          const heightMm = Math.ceil((el.scrollHeight / 96) * 25.4) + 4; // 96 CSS px/inch, 25.4mm/inch, +4mm safety
-          let styleEl = document.getElementById("hz-dynamic-page-size");
-          if (!styleEl) { styleEl = document.createElement("style"); styleEl.id = "hz-dynamic-page-size"; document.head.appendChild(styleEl); }
-          styleEl.textContent = `@media print { @page { size: 80mm ${heightMm}mm; margin: 0; } }`;
-        }
-      } catch (e) { console.error("Couldn't measure receipt height for print", e); }
-      window.print();
-    }, 60);
+        const heightMm = Math.ceil((win.document.body.scrollHeight / 96) * 25.4) + 4;
+        const st = win.document.createElement("style");
+        st.textContent = `@page{size:80mm ${heightMm}mm;margin:0;}`;
+        win.document.head.appendChild(st);
+      } catch (e) { console.error("Couldn't size print page", e); }
+      win.focus(); win.print();
+      setTimeout(() => { try { win.close(); } catch (e) {} }, 400);
+    };
+    if (win.document.readyState === "complete") setTimeout(runPrint, 80);
+    else win.onload = () => setTimeout(runPrint, 80);
   };
   return (
     <div className={"hz-printroot show-" + which} ref={printRootRef} onClick={onClose}>
