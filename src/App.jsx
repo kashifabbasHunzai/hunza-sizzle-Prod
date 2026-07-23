@@ -2290,6 +2290,7 @@ function QRCodes({ ctx, isAdmin, myBranch, branch, onPreview }) {
    The chosen one is printed via CSS `@media print` rules. */
 function PrintModal({ order: o, onClose }) {
   const [which, setWhich] = useState("both");
+  const printRootRef = useRef(null);
   const T = typeMeta(o);
   const fee = o.fee != null ? o.fee : (o.type === "delivery" ? 120 : 0);
   const tax = o.tax || 0;
@@ -2297,9 +2298,29 @@ function PrintModal({ order: o, onClose }) {
   const subtotal = total(o);
   const when = new Date(o.createdAt).toLocaleString("en-GB", { day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
   const typeLabel = o.type === "delivery" ? "Delivery" : o.type === "takeaway" ? "Pickup" : o.type === "carhop" ? "Curbside" : "Dine-in";
-  const printAs = (w) => { setWhich(w); setTimeout(() => window.print(), 60); };
+  /* @page { size: 80mm auto } SHOULD let the page end exactly where the
+     receipt ends — but several Windows POS-printer drivers silently ignore
+     "auto" and fall back to their default registered paper (often A4/Letter),
+     which is what prints a blank leading page before the receipt shows up.
+     Measuring the receipt's real height and injecting an EXACT millimetre
+     value is far more reliably honoured than the "auto" keyword. */
+  const printAs = (w) => {
+    setWhich(w);
+    setTimeout(() => {
+      try {
+        const el = printRootRef.current;
+        if (el) {
+          const heightMm = Math.ceil((el.scrollHeight / 96) * 25.4) + 4; // 96 CSS px/inch, 25.4mm/inch, +4mm safety
+          let styleEl = document.getElementById("hz-dynamic-page-size");
+          if (!styleEl) { styleEl = document.createElement("style"); styleEl.id = "hz-dynamic-page-size"; document.head.appendChild(styleEl); }
+          styleEl.textContent = `@media print { @page { size: 80mm ${heightMm}mm; margin: 0; } }`;
+        }
+      } catch (e) { console.error("Couldn't measure receipt height for print", e); }
+      window.print();
+    }, 60);
+  };
   return (
-    <div className={"hz-printroot show-" + which} onClick={onClose}>
+    <div className={"hz-printroot show-" + which} ref={printRootRef} onClick={onClose}>
       <div className="hz-print-toolbar" onClick={(e) => e.stopPropagation()}>
         <span><Receipt size={15} />Order #{o.q} · {branchName(o.branch)}</span>
         <div className="hz-print-btns">
