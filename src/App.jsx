@@ -387,9 +387,16 @@ export default function App() {
           }
           await setDoc(doc(db, "hunza", "counters"), { orderSeq: QC }, { merge: true });
         }
+        const usersCol = collection(db, "users");
+        const existingUsers = await getDocs(usersCol);
+        if (existingUsers.empty) {
+          const batch = writeBatch(db);
+          SEED_USERS.forEach((u) => batch.set(doc(db, "users", u.id), sanitize(u)));
+          await batch.commit();
+        }
         const mRef = doc(db, "hunza", "meta");
         const mSnap = await getDoc(mRef);
-        if (!mSnap.exists()) await setDoc(mRef, { users: SEED_USERS, menu: SEED_MENU, inventory: SEED_INVENTORY, purchases: SEED_PURCHASES, requests: SEED_REQUESTS, branchOpen: { g91: true, i8: true } });
+        if (!mSnap.exists()) await setDoc(mRef, { menu: SEED_MENU, inventory: SEED_INVENTORY, purchases: SEED_PURCHASES, requests: SEED_REQUESTS, branchOpen: { g91: true, i8: true } });
       } catch (e) { console.error("Firestore seed failed", e); }
     })();
   }, []);
@@ -401,6 +408,15 @@ export default function App() {
       setOrders(snap.docs.map((d) => d.data()));
       setOnline(true);
     }, (e) => { console.error("Firestore orders listen failed", e); });
+    /* Staff/users get the same one-document-per-record treatment as orders —
+       they used to live as one array inside the shared "meta" doc, which
+       meant two devices editing staff around the same moment could silently
+       overwrite each other (e.g. a newly added staff member vanishing right
+       after being created because another device's stale write landed after). */
+    const unsubUsers = onSnapshot(collection(db, "users"), (snap) => {
+      setUsers(snap.docs.map((d) => d.data()));
+      setOnline(true);
+    }, (e) => { console.error("Firestore users listen failed", e); });
     const unsubNotifs = onSnapshot(query(collection(db, "notifs"), orderBy("time", "desc"), limit(60)), (snap) => {
       setNotifs(snap.docs.map((d) => d.data()));
     }, (e) => { console.error("Firestore notifs listen failed", e); });
@@ -409,7 +425,6 @@ export default function App() {
       const d = snap.data();
       if (JSON.stringify(d) !== JSON.stringify(remoteMetaRef.current)) {
         remoteMetaRef.current = d;
-        if (d.users) setUsers(d.users);
         if (d.menu) setMenu(d.menu);
         if (d.inventory) setInventory(d.inventory);
         if (d.purchases) setPurchases(d.purchases);
@@ -418,20 +433,22 @@ export default function App() {
       }
       setOnline(true);
     }, (e) => { console.error("Firestore meta listen failed", e); });
-    return () => { unsubOrders(); unsubNotifs(); unsubMeta(); };
+    return () => { unsubOrders(); unsubUsers(); unsubNotifs(); unsubMeta(); };
   }, []);
 
-  // Push meta changes (staff/menu/inventory/purchases/requests/branchOpen) up
-  // to Firestore. Orders are NOT pushed here — each order mutator (addOrder,
-  // markReady, cancel…) writes straight to that order's own document instead.
+  // Push meta changes (menu/inventory/purchases/requests/branchOpen) up to
+  // Firestore. Orders and users are NOT pushed here — each of their own
+  // mutators (addOrder, addUser, updateUser…) write straight to that
+  // record's own document instead, so concurrent edits from different
+  // devices can never overwrite one another.
   useEffect(() => {
     if (!FIREBASE_READY) return;
-    const current = { users, menu, inventory, purchases, requests, branchOpen };
+    const current = { menu, inventory, purchases, requests, branchOpen };
     const json = JSON.stringify(current);
     if (json === JSON.stringify(remoteMetaRef.current)) return;
     remoteMetaRef.current = current;
     setDoc(doc(db, "hunza", "meta"), sanitize(current)).catch((e) => console.error("Firestore meta write failed", e));
-  }, [users, menu, inventory, purchases, requests, branchOpen]);
+  }, [menu, inventory, purchases, requests, branchOpen]);
 
   /* On load, work out where the visitor should land:
      - `?b=<branch>&t=<table>` (or `&m=car`) → a scanned QR: open the order page
@@ -606,12 +623,25 @@ export default function App() {
     return o;
   };
 
+  const updateUserDoc = (id, patch) => { if (FIREBASE_READY) updateDoc(doc(db, "users", id), sanitize(patch)).catch((e) => console.error("Firestore user update failed", e)); };
+
   const addUser = (u) => {
-    setUsers((p) => [...p, { id: nextId(p, "u"), active: true, salary: u.salary || 0, advances: [], joined: now(), payments: [], ...u }]);
+    const nu = { id: nextId(users, "u"), active: true, salary: u.salary || 0, advances: [], joined: now(), payments: [], ...u };
+    if (FIREBASE_READY) setDoc(doc(db, "users", nu.id), sanitize(nu)).catch((e) => console.error("Firestore user create failed", e));
+    else setUsers((p) => [...p, nu]);
     toast(`User created · ${u.name}`, ROLE_META[u.role].color);
   };
-  const toggleUser = (id) => setUsers((p) => p.map((u) => u.id === id ? { ...u, active: !u.active } : u));
-  const deleteUser = (id) => { const u = users.find((x) => x.id === id); setUsers((p) => p.filter((x) => x.id !== id)); toast(`Staff removed · ${u?.name || ""}`, "#FF5470"); };
+  const toggleUser = (id) => {
+    const u = users.find((x) => x.id === id); if (!u) return;
+    if (FIREBASE_READY) updateUserDoc(id, { active: !u.active });
+    else setUsers((p) => p.map((x) => x.id === id ? { ...x, active: !x.active } : x));
+  };
+  const deleteUser = (id) => {
+    const u = users.find((x) => x.id === id);
+    if (FIREBASE_READY) deleteDoc(doc(db, "users", id)).catch((e) => console.error("Firestore user delete failed", e));
+    else setUsers((p) => p.filter((x) => x.id !== id));
+    toast(`Staff removed · ${u?.name || ""}`, "#FF5470");
+  };
   /* Every edit records who made it and when, so lists can show
      "Edited by <name> · <time>" — a simple audit trail for the owner. */
   const stamp = () => ({ editedBy: session ? session.name : "System", editedAt: now() });
@@ -620,14 +650,34 @@ export default function App() {
     if (patch.username && users.some((u) => u.id !== id && u.username.toLowerCase() === patch.username.toLowerCase())) {
       toast(`Username "${patch.username}" is already taken`, "#FF5470"); return false;
     }
-    setUsers((p) => p.map((u) => u.id === id ? { ...u, ...patch, ...stamp() } : u));
+    if (FIREBASE_READY) updateUserDoc(id, { ...patch, ...stamp() });
+    else setUsers((p) => p.map((u) => u.id === id ? { ...u, ...patch, ...stamp() } : u));
     toast(`Staff updated · ${patch.name || ""}`, "#5A9CFF");
     return true;
   };
-  const setSalary = (id, amount) => { setUsers((p) => p.map((u) => u.id === id ? { ...u, salary: amount } : u)); toast(`Salary set · ${rs(amount)}`, "#5A9CFF"); };
-  const addAdvance = (id, amount, note) => { setUsers((p) => p.map((u) => u.id === id ? { ...u, advances: [...(u.advances || []), { id: "a" + now(), amount, note, date: now() }] } : u)); const u = users.find((x) => x.id === id); toast(`Advance ${rs(amount)} → ${u?.name}`, "#FFB22C"); };
-  const paySalary = (id, month, amount) => { const u = users.find((x) => x.id === id); if (!u) return; setUsers((p) => p.map((x) => x.id === id ? { ...x, payments: [...(x.payments || []).filter((q) => q.month !== month), { id: "p" + now(), month, amount, date: now() }] } : x)); toast(`Paid ${monthLong(month)} salary · ${u.name} (${rs(amount)})`, "#29D3A6"); };
-  const unpaySalary = (id, month) => { const u = users.find((x) => x.id === id); setUsers((p) => p.map((x) => x.id === id ? { ...x, payments: (x.payments || []).filter((q) => q.month !== month) } : x)); toast(`${monthLong(month)} marked unpaid · ${u?.name}`, "#FF5470"); };
+  const setSalary = (id, amount) => {
+    if (FIREBASE_READY) updateUserDoc(id, { salary: amount });
+    else setUsers((p) => p.map((u) => u.id === id ? { ...u, salary: amount } : u));
+    toast(`Salary set · ${rs(amount)}`, "#5A9CFF");
+  };
+  const addAdvance = (id, amount, note) => {
+    const u = users.find((x) => x.id === id); if (!u) return;
+    const advances = [...(u.advances || []), { id: "a" + now(), amount, note, date: now() }];
+    if (FIREBASE_READY) updateUserDoc(id, { advances }); else setUsers((p) => p.map((x) => x.id === id ? { ...x, advances } : x));
+    toast(`Advance ${rs(amount)} → ${u.name}`, "#FFB22C");
+  };
+  const paySalary = (id, month, amount) => {
+    const u = users.find((x) => x.id === id); if (!u) return;
+    const payments = [...(u.payments || []).filter((q) => q.month !== month), { id: "p" + now(), month, amount, date: now() }];
+    if (FIREBASE_READY) updateUserDoc(id, { payments }); else setUsers((p) => p.map((x) => x.id === id ? { ...x, payments } : x));
+    toast(`Paid ${monthLong(month)} salary · ${u.name} (${rs(amount)})`, "#29D3A6");
+  };
+  const unpaySalary = (id, month) => {
+    const u = users.find((x) => x.id === id); if (!u) return;
+    const payments = (u.payments || []).filter((q) => q.month !== month);
+    if (FIREBASE_READY) updateUserDoc(id, { payments }); else setUsers((p) => p.map((x) => x.id === id ? { ...x, payments } : x));
+    toast(`${monthLong(month)} marked unpaid · ${u?.name}`, "#FF5470");
+  };
 
   const addStock = (id, qty) => setInventory((p) => p.map((it) => it.id === id ? { ...it, stock: +(it.stock + qty).toFixed(1) } : it));
   const updateInventory = (id, patch) => { setInventory((p) => p.map((it) => it.id === id ? { ...it, ...patch, ...stamp() } : it)); toast(`Item updated · ${patch.name || ""}`, "#5A9CFF"); };
@@ -2223,7 +2273,33 @@ function QRCodes({ ctx, isAdmin, myBranch, branch, onPreview }) {
   const preview = () => kind === "car" ? onPreview(activeBranch, { kind: "car", spot: spot.trim() }) : onPreview(activeBranch, { kind: "dine", table: table.trim() });
   const n = Math.min(12, Math.max(1, +count || 6));
   const slots = Array.from({ length: n }, (_, i) => String(i + 1));
-  const subLabel = kind === "car" ? `Curbside${spot ? " · Spot " + spot : ""}` : (table ? `Table ${table}` : "branch-wide");
+  const slotLabel = (t) => kind === "car" ? "Car " + t : "Table " + t;
+  const subLabel = kind === "car" ? `Curbside${spot ? " · Car " + spot : ""}` : (table ? `Table ${table}` : "branch-wide");
+  /* Printing QR stickers is a completely different job from receipts — these
+     go on a normal A4/Letter printer (to laminate or cut out and stick on a
+     table/parking spot), not the POS roll printer, so this opens its own
+     plain print window sized for a full page rather than the 80mm receipt one. */
+  const printQR = (items, title) => {
+    const win = window.open("", "_blank", "width=480,height=640");
+    if (!win) { ctx.toast("Enable pop-ups to print QR codes", "#FF5470"); return; }
+    const cards = items.map((it) => `<div class="card"><div class="lbl">${it.label}</div><img src="${it.src}" width="220" height="220" /><div class="sub">${branchName(activeBranch)}${it.note ? " · " + it.note : ""}</div></div>`).join("");
+    win.document.open();
+    win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title><style>
+      *{margin:0;padding:0;box-sizing:border-box;}
+      body{font-family:Arial,Helvetica,sans-serif;padding:10mm;}
+      .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(65mm,1fr));gap:8mm;}
+      .card{border:2px dashed #999;border-radius:6px;padding:6mm;text-align:center;page-break-inside:avoid;}
+      .lbl{font-size:16px;font-weight:900;margin-bottom:3mm;}
+      .sub{font-size:11px;color:#555;margin-top:3mm;}
+      img{display:block;margin:0 auto;}
+    </style></head><body><div class="grid">${cards}</div></body></html>`);
+    win.document.close();
+    const run = () => { win.focus(); win.print(); setTimeout(() => { try { win.close(); } catch (e) {} }, 400); };
+    if (win.document.readyState === "complete") setTimeout(run, 150);
+    else win.onload = () => setTimeout(run, 150);
+  };
+  const printOne = () => printQR([{ label: kind === "car" ? "Curbside" : (table ? "Table " + table : branchName(activeBranch)), src: qrSrc(link, 400), note: subLabel }], "QR Code");
+  const printAll = () => printQR(slots.map((t) => ({ label: slotLabel(t), src: qrSrc(kind === "car" ? carLink(activeBranch, t) : tableLink(activeBranch, t), 400) })), `${kind === "car" ? "Car" : "Table"} QR Codes — ${branchName(activeBranch)}`);
   return (
     <>
       <div className="hz-qrhead"><QrCode size={15} /><div><b>Scan-to-order QR codes<InfoTip label="How scan-to-order works">A separate QR for every table (dine-in) or car (curbside).<br /><br />Scanning opens that branch's order page with the {kind === "car" ? "car order" : "table"} already set, and the order then shows against that {kind === "car" ? "car" : "table"} for Admin and Manager.</InfoTip></b><span>Generate a QR for each table or parking spot.</span></div></div>
@@ -2258,6 +2334,7 @@ function QRCodes({ ctx, isAdmin, myBranch, branch, onPreview }) {
           <div className="hz-qrlink"><span>{link}</span></div>
           <div className="hz-qracts">
             <button className="hz-cta sm" onClick={preview}><Play size={14} />Preview as customer</button>
+            <button className="hz-ghost" onClick={printOne}><Receipt size={14} />Print QR</button>
             <button className="hz-ghost" onClick={copy}><ClipboardList size={14} />Copy link</button>
           </div>
 
@@ -2266,12 +2343,12 @@ function QRCodes({ ctx, isAdmin, myBranch, branch, onPreview }) {
 
       <div className="hz-card" style={{ marginTop: 14 }}>
         <div className="hz-card-h"><h3>Quick {kind === "car" ? "car-spot" : "table"} QR codes · {branchName(activeBranch)}</h3>
-          <span className="hz-card-sub">{kind === "car" ? "spots" : "tables"}&nbsp;<input className="hz-countin" value={count} onChange={(e) => setCount(e.target.value.replace(/[^\d]/g, ""))} /></span></div>
+          <span className="hz-card-sub">{kind === "car" ? "spots" : "tables"}&nbsp;<input className="hz-countin" value={count} onChange={(e) => setCount(e.target.value.replace(/[^\d]/g, ""))} />&nbsp;<button className="hz-mini" title="Print all" onClick={printAll}><Receipt size={13} /></button></span></div>
         <div className="hz-qrgrid">
           {slots.map((t) => { const lnk = kind === "car" ? carLink(activeBranch, t) : tableLink(activeBranch, t);
             return (
               <div className="hz-qrcell" key={t}>
-                <div className="hz-qrcell-top">{kind === "car" ? "Spot " : "Table "}{t}</div>
+                <div className="hz-qrcell-top">{slotLabel(t)}</div>
                 {imgErr ? <div className="hz-qrcell-fb"><QrCode size={34} /></div> : <img src={qrSrc(lnk, 130)} alt={"QR " + t} onError={() => setImgErr(true)} />}
                 <button className="hz-mini" onClick={() => kind === "car" ? onPreview(activeBranch, { kind: "car", spot: t }) : onPreview(activeBranch, { kind: "dine", table: t })}><Play size={13} /></button>
               </div>

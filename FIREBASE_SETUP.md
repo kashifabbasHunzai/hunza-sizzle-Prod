@@ -73,6 +73,9 @@ service cloud.firestore {
     match /notifs/{notifId} {
       allow read, write: if true;
     }
+    match /users/{userId} {
+      allow read, write: if true;
+    }
   }
 }
 ```
