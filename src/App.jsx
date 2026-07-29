@@ -141,6 +141,14 @@ const pinProblem = (pin) => {
 
 /* ---- Sales tax: I-8 Markaz branch only. Cash/COD 16%, card/online 5% ---- */
 const TAX_BRANCH = "i8";
+
+/* Where customers send online payments. Shown on the checkout screen when they
+   pick "Online Payment". Edit these three values to change the account. */
+const PAY_ACCOUNT = {
+  title: "Hassan Khan",
+  number: "0348 8503582",
+  banks: "EasyPaisa · JazzCash",
+};
 const taxRate = (branch, payMethod) => branch !== TAX_BRANCH ? 0 : (payMethod === "card" ? 0.05 : 0.16);
 const taxOf = (branch, payMethod, amount) => Math.round(amount * taxRate(branch, payMethod));
 
@@ -420,8 +428,13 @@ export default function App() {
     const unsubNotifs = onSnapshot(query(collection(db, "notifs"), orderBy("time", "desc"), limit(60)), (snap) => {
       setNotifs(snap.docs.map((d) => d.data()));
     }, (e) => { console.error("Firestore notifs listen failed", e); });
-    const unsubMeta = onSnapshot(doc(db, "hunza", "meta"), (snap) => {
+    const unsubMeta = onSnapshot(doc(db, "hunza", "meta"), { includeMetadataChanges: false }, (snap) => {
       if (!snap.exists()) return;
+      /* Skip snapshots that are just our OWN write echoing back (hasPendingWrites
+         is true until the server confirms). Applying those re-sets menu/inventory
+         to the value we just sent, which — combined with the write effect below —
+         made a freshly added item flicker in and then vanish. */
+      if (snap.metadata.hasPendingWrites) return;
       const d = snap.data();
       if (JSON.stringify(d) !== JSON.stringify(remoteMetaRef.current)) {
         remoteMetaRef.current = d;
@@ -446,8 +459,10 @@ export default function App() {
     const current = { menu, inventory, purchases, requests, branchOpen };
     const json = JSON.stringify(current);
     if (json === JSON.stringify(remoteMetaRef.current)) return;
+    /* Update our local "known remote" copy BEFORE writing, so if the write's
+       own snapshot slips through it compares equal and doesn't re-apply. */
     remoteMetaRef.current = current;
-    setDoc(doc(db, "hunza", "meta"), sanitize(current)).catch((e) => console.error("Firestore meta write failed", e));
+    setDoc(doc(db, "hunza", "meta"), sanitize(current), { merge: true }).catch((e) => console.error("Firestore meta write failed", e));
   }, [menu, inventory, purchases, requests, branchOpen]);
 
   /* On load, work out where the visitor should land:
@@ -510,6 +525,27 @@ export default function App() {
     flash(id);
     if (FIREBASE_READY) updateOrderDoc(id, { status: "preparing" });
     else setOrders((prev) => prev.map((x) => x.id === id && x.status === "new" ? { ...x, status: "preparing" } : x));
+  };
+
+  /* Add more items to an order that's already running (a customer at a table
+     or the counter orders another drink, etc.). Items are merged by name, and
+     the sales tax is recomputed on the new subtotal so the final bill is right.
+     Used by staff only — never exposed to the online customer flow. */
+  const addItemsToOrder = (id, newItems) => {
+    const o = orders.find((x) => x.id === id);
+    if (!o || !newItems || !newItems.length) return;
+    const items = o.items.map((i) => ({ ...i }));
+    newItems.forEach((ni) => {
+      const ex = items.find((i) => i.name === ni.name && i.price === ni.price);
+      if (ex) ex.qty += ni.qty; else items.push({ name: ni.name, qty: ni.qty, price: ni.price });
+    });
+    const sub = items.reduce((a, b) => a + b.price * b.qty, 0);
+    const tax = taxOf(o.branch, o.payMethod || "cod", sub + (o.fee || 0));
+    const patch = { items, tax };
+    flash(id);
+    toast(`Added to order #${o.q}`, "#29D3A6");
+    if (FIREBASE_READY) updateOrderDoc(id, patch);
+    else setOrders((prev) => prev.map((x) => x.id === id ? { ...x, ...patch } : x));
   };
 
   /* Notifications are addressed to a target: one or more roles, optionally a
@@ -600,7 +636,7 @@ export default function App() {
       priority: false, createdAt: now(), notes: "", ...partial, waiter };
     /* Orders taken by a waiter at the counter don't pass fee/tax, so work them
        out here. This keeps sales tax consistent no matter how the order arrived. */
-    if (o.fee == null) o.fee = o.type === "delivery" ? 120 : 0;
+    if (o.fee == null) o.fee = 0;   // delivery charges are added later by the rider, per location
     if (o.tax == null) {
       const method = o.payMethod || (o.payment === "paid" ? "card" : "cod");
       o.payMethod = method;
@@ -620,6 +656,16 @@ export default function App() {
     else if (partial.source === "car") toast(`Curbside #${q} → ${where} · ${waiter}`, "#29D3A6");
     else if (partial.source === "qr") toast(`#${q} → ${waiter} (${where}, lightest load)`, "#29D3A6");
     else toast(`Order #${q} → ${where} · print at counter`, "#FF6B2C");
+
+    /* Ring the bell for everyone who needs to act on this order:
+       admin + branch manager always, and the assigned rider or waiter. */
+    const isDel = partial.type === "delivery";
+    const kindLabel = isDel ? "Delivery" : partial.type === "takeaway" ? "Takeaway" : partial.type === "carhop" ? "Curbside" : "Dine-in";
+    const proofNote = o.payMethod === "card" ? " · online payment — verify" : "";
+    pushNotif({ roles: ["admin", "manager"], branch: partial.branch },
+      `🧾 New ${kindLabel} order #${q} (${where})${proofNote}`, "#FF6B2C");
+    if (waiter) pushNotif({ roles: [isDel ? "rider" : "waiter"], name: waiter, branch: partial.branch },
+      `🔔 New order #${q} assigned to you — ${kindLabel} (${where})`, isDel ? "#9B8CFF" : "#29D3A6");
     return o;
   };
 
@@ -730,7 +776,7 @@ export default function App() {
   }, [orders]);
 
   const ctx = { orders, queue, users, inventory, requests, menu, branchWaiters, lightestWaiter, branchRiders, lightestRider, activeCount,
-    setStatus, markServed, markPreparing, markReady, riderStep, notifs, cancel, togglePriority, setPaid, setUnpaid, addOrder, addUser, toggleUser, deleteUser,
+    setStatus, markServed, markPreparing, markReady, riderStep, notifs, cancel, togglePriority, setPaid, setUnpaid, addOrder, addItemsToOrder, addUser, toggleUser, deleteUser,
     setSalary, addAdvance, paySalary, unpaySalary, addStock, restock, buyStock, purchases, addRequest, fulfillRequest, rejectRequest,
     addMenuItem, toggleMenuItem, toggleMenuBranch, deleteMenuItem, updateMenuItem, updateUser, updateInventory, deleteInventory, branchOpen, toggleBranch,
     pulse: pulse.current, auto, setAuto, toast };
@@ -1169,6 +1215,7 @@ function Waiter({ ctx, me, branch }) {
                 {isReady
                   ? <button className="hz-deliverbtn" onClick={() => ctx.markServed(o.id)}>{o.type === "carhop" ? <Car size={15} /> : <MapPin size={15} />}{o.type === "carhop" ? "Delivered to car" : o.type === "takeaway" ? "Handed over" : "Served to table"}</button>
                   : <div className="hz-wstatusnote"><Clock size={13} />Preparing… ETA {etaMins(o)}m</div>}
+                {o.type !== "delivery" && <AddItemsBar o={o} ctx={ctx} />}
               </div>
             );
           })}
@@ -1410,15 +1457,6 @@ function Track({ o, ctx, onNew }) {
             <div className="hz-track-sumrow total"><span>Total</span><span>{rs(grand(o))}</span></div>
           </div>
           <div className={"hz-pay bare " + o.payment}>{o.payment === "paid" ? "Paid" : o.payment === "pending" ? "Payment pending verification" : "Pay on " + (o.type === "delivery" ? "delivery" : "collection")}</div>
-          {o.payment === "pending" && (
-            <div className="hz-paydetails">
-              <div className="hz-paydetails-h"><ShieldCheck size={14} />Sent payment to</div>
-              <div className="hz-paydetails-row"><span>Account title</span><b>Hassan Khan</b></div>
-              <div className="hz-paydetails-row"><span>Account number</span><b>0348-8503582</b></div>
-              <div className="hz-paydetails-row"><span>Banks</span><b>EasyPaisa · JazzCash</b></div>
-              <div className="hz-paydetails-note">If you haven't sent it yet, send {rs(grand(o))} to this number — staff will verify it shortly.</div>
-            </div>
-          )}
         </div>
       </div>
       <button className="hz-back wide center" onClick={onNew}>+ Place another order</button>
@@ -1541,17 +1579,28 @@ function OrderCheckout({ ctx, mode, branch, table, spotPrefill, items, sum, onBa
   const [name, setName] = useState(""); const [phone, setPhone] = useState(""); const [address, setAddress] = useState("");
   const [vehicle, setVehicle] = useState(""); const [spot, setSpot] = useState(spotPrefill || ""); const [notes, setNotes] = useState("");
   const [pay, setPay] = useState("cod"); const [err, setErr] = useState(""); const [placing, setPlacing] = useState(false);
-  const fee = delivery ? 120 : 0;
+  const [proof, setProof] = useState("");   // payment screenshot (data URL) for online payments
+  // Delivery is not charged a fixed fee anymore — the rider works it out by
+  // location, so it isn't part of the bill the customer sees here.
+  const fee = 0;
   const tRate = taxRate(branch, pay);
   const tax = taxOf(branch, pay, sum + fee);
   const payable = sum + fee + tax;
+  const onProof = (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const r = new FileReader();
+    r.onload = () => setProof(r.result);
+    r.readAsDataURL(f);
+  };
   const place = () => {
     if (placing) return; // guard against double-tap while the previous request is still in flight
     if (!name.trim()) { setErr("Please enter your name."); return; }
     if ((delivery || pickup) && phone.trim().length < 7) { setErr("Please enter a valid phone number."); return; }
     if (delivery && !address.trim()) { setErr("A delivery address is required."); return; }
     if (mode === "car" && (!vehicle.trim() || !spot.trim())) { setErr("Please enter your vehicle number and parking spot."); return; }
-    const money = { fee, tax, taxRate: tRate, payMethod: pay };
+    if (pay === "card" && !proof) { setErr("Please attach a screenshot of your payment to confirm the order."); return; }
+    const money = { fee, tax, taxRate: tRate, payMethod: pay, payProof: pay === "card" ? proof : undefined };
     let partial;
     // Online/card payment isn't actually verified here (no payment gateway is
     // wired up) — it only means "customer claims to have paid online", so it
@@ -1582,10 +1631,10 @@ function OrderCheckout({ ctx, mode, branch, table, spotPrefill, items, sum, onBa
       <div className="hz-cosum">
         {items.map((i) => <div key={i.name}><span>{i.qty}× {i.name}</span><b>{rs(i.price * i.qty)}</b></div>)}
         <div><span>Subtotal</span><b>{rs(sum)}</b></div>
-        {delivery && <div><span>Delivery fee</span><b>{rs(fee)}</b></div>}
         {tax > 0 && <div><span>Sales tax ({Math.round(tRate * 100)}%)</span><b>{rs(tax)}</b></div>}
         <div className="hz-cosum-t"><span>Total</span><b>{rs(payable)}</b></div>
       </div>
+      {delivery && <div className="hz-branchnote" style={{ marginBottom: 12 }}><Truck size={13} />Delivery charges are added by the rider based on your location — they are not included here yet.</div>}
       <div className="hz-form">
         <label><span><User size={12} /> Name</span><input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" /></label>
         {(delivery || pickup) && <label><span><Phone size={12} /> Phone</span><input value={phone} onChange={(e) => setPhone(e.target.value.replace(/[^\d-]/g, ""))} placeholder="03xx-xxxxxxx" /></label>}
@@ -1596,16 +1645,22 @@ function OrderCheckout({ ctx, mode, branch, table, spotPrefill, items, sum, onBa
           <button className={"hz-payopt" + (pay === "cod" ? " on" : "")} onClick={() => setPay("cod")}><Banknote size={16} />{delivery ? "Cash on Delivery" : "Cash at counter"}{branch === TAX_BRANCH && <em className="hz-taxhint">+16% tax</em>}</button>
           <button className={"hz-payopt" + (pay === "card" ? " on" : "")} onClick={() => setPay("card")}><CreditCard size={16} />Online Payment{branch === TAX_BRANCH && <em className="hz-taxhint save">+5% tax</em>}</button>
         </div>
+        {branch === TAX_BRANCH && <div className="hz-branchnote"><Receipt size={12} />Pay by card and save {rs(taxOf(branch, "cod", sum + fee) - taxOf(branch, "card", sum + fee))}<InfoTip label="About sales tax">Sales tax at {branchName(TAX_BRANCH)} is 16% on cash payments but only 5% on card or online payments, so paying by card costs you less.</InfoTip></div>}
         {pay === "card" && (
-          <div className="hz-paydetails">
-            <div className="hz-paydetails-h"><ShieldCheck size={14} />Send payment to</div>
-            <div className="hz-paydetails-row"><span>Account title</span><b>Hassan Khan</b></div>
-            <div className="hz-paydetails-row"><span>Account number</span><b>0348-8503582</b></div>
-            <div className="hz-paydetails-row"><span>Banks</span><b>EasyPaisa · JazzCash</b></div>
-            <div className="hz-paydetails-note">Send {rs(payable)} to this number, then place your order. Staff will verify the payment before it's marked as paid.</div>
+          <div className="hz-payinfo">
+            <div className="hz-payinfo-h"><CreditCard size={14} />Send payment to this account</div>
+            <div className="hz-payinfo-row"><span>Account title</span><b>{PAY_ACCOUNT.title}</b></div>
+            <div className="hz-payinfo-row"><span>Account number</span><b className="hz-acct">{PAY_ACCOUNT.number}</b></div>
+            <div className="hz-payinfo-row"><span>Send via</span><b>{PAY_ACCOUNT.banks}</b></div>
+            <div className="hz-payinfo-amt"><span>Amount to send</span><b>{rs(payable)}</b></div>
+            <label className="hz-payproof">
+              {proof
+                ? <div className="hz-proof-done"><img src={proof} alt="payment proof" /><span><CheckCircle2 size={13} /> Screenshot attached — tap to change</span></div>
+                : <div className="hz-proof-ph"><ImagePlus size={22} /><span>Attach payment screenshot to confirm</span></div>}
+              <input type="file" accept="image/*" onChange={onProof} hidden />
+            </label>
           </div>
         )}
-        {branch === TAX_BRANCH && <div className="hz-branchnote"><Receipt size={12} />Pay by card and save {rs(taxOf(branch, "cod", sum + fee) - taxOf(branch, "card", sum + fee))}<InfoTip label="About sales tax">Sales tax at {branchName(TAX_BRANCH)} is 16% on cash payments but only 5% on card or online payments, so paying by card costs you less.</InfoTip></div>}
         {err && <div className="hz-err"><CircleAlert size={13} />{err}</div>}
         <div className="hz-corow"><button className="hz-back wide" onClick={onBack}>← Menu</button>
           <button className="hz-cta" disabled={placing} onClick={place}>{placing ? "Placing…" : <>Place order · {rs(payable)}</>}{!placing && <ArrowRight size={15} />}</button></div>
@@ -1763,6 +1818,27 @@ function DashCard({ icon: Icon, label, val, sub, c, big }) {
    Firestore sync used everywhere else). Only the immediate next stage is
    clickable at a time, so staff can't accidentally skip a step or send a
    confusing "delivered" message before the rider actually picked it up. */
+/* Shows the customer's payment screenshot on a staff order card. A thumbnail
+   that opens full-size when tapped, so admin/manager can verify the transfer. */
+function ProofView({ src, q }) {
+  const [big, setBig] = useState(false);
+  return (
+    <>
+      <button className="hz-proofthumb" onClick={() => setBig(true)}>
+        <img src={src} alt={`Payment proof for order #${q}`} />
+        <span><Receipt size={11} />Payment screenshot — tap to view</span>
+      </button>
+      {big && (
+        <div className="hz-prooflightbox" onClick={() => setBig(false)}>
+          <div className="hz-prooflb-inner" onClick={(e) => e.stopPropagation()}>
+            <div className="hz-prooflb-h"><b>Payment proof · Order #{q}</b><button onClick={() => setBig(false)}><X size={16} /></button></div>
+            <img src={src} alt={`Payment proof for order #${q}`} />
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
 function StageIcons({ o, ctx }) {
   const del = o.type === "delivery";
   const steps = del
@@ -1802,6 +1878,45 @@ function StageIcons({ o, ctx }) {
 }
 /* Live operations: branch open/closed switches, team workload, and the order
    list where staff print tickets and mark orders ready. */
+/* A collapsible "add more items" strip shown on a running order. Staff pick
+   from that branch's live menu; quantities merge into the existing bill and the
+   total re-totals automatically. Used on the Operations and Waiter screens. */
+function AddItemsBar({ o, ctx }) {
+  const [open, setOpen] = useState(false);
+  const [pick, setPick] = useState({});   // { menuItemId: qty }
+  const menu = menuForBranch(ctx.menu, o.branch);
+  const chosen = menu.filter((m) => pick[m.id] > 0);
+  const addQty = (id, d) => setPick((p) => { const n = Math.max(0, (p[id] || 0) + d); const c = { ...p }; if (n) c[id] = n; else delete c[id]; return c; });
+  const confirm = () => {
+    if (!chosen.length) return;
+    ctx.addItemsToOrder(o.id, chosen.map((m) => ({ name: m.name, qty: pick[m.id], price: m.price })));
+    setPick({}); setOpen(false);
+  };
+  if (!open) return (
+    <div className="hz-additems-open"><button className="hz-additems-btn" onClick={() => setOpen(true)}><Plus size={13} />Add items to this order</button></div>
+  );
+  return (
+    <div className="hz-additems">
+      <div className="hz-additems-h"><span><Plus size={13} />Add to order #{o.q}</span><button onClick={() => { setOpen(false); setPick({}); }}><X size={14} /></button></div>
+      <div className="hz-additems-list">
+        {menu.map((m) => (
+          <div className="hz-additems-row" key={m.id}>
+            <span className="hz-ai-name">{m.name}</span>
+            <span className="hz-ai-price">{rs(m.price)}</span>
+            <div className="hz-ai-qty">
+              <button onClick={() => addQty(m.id, -1)} disabled={!pick[m.id]}>−</button>
+              <b>{pick[m.id] || 0}</b>
+              <button onClick={() => addQty(m.id, 1)}>+</button>
+            </div>
+          </div>
+        ))}
+      </div>
+      <button className="hz-additems-confirm" disabled={!chosen.length} onClick={confirm}>
+        <Check size={14} />Add {chosen.reduce((a, m) => a + pick[m.id], 0) || ""} item{chosen.length === 1 ? "" : "s"} · +{rs(chosen.reduce((a, m) => a + m.price * pick[m.id], 0))}
+      </button>
+    </div>
+  );
+}
 function ManagerOps({ ctx, branch, onPrint }) {
   const inB = (o) => branch === "all" || o.branch === branch;
   const [dayFilter, setDayFilter] = useState("today"); // today | yesterday | week | all
@@ -1874,6 +1989,7 @@ function ManagerOps({ ctx, branch, onPrint }) {
               <div className="hz-mhead"><span className="hz-tq"><Hash size={12} />{o.q}</span><Badge s={o.status} sm /><BranchTag b={o.branch} />{ACTIVE(o.status) && <span className="hz-qpos">Q#{ctx.queue[o.id]}</span>}{(o.source === "qr" || o.source === "online" || o.source === "car") && <span className="hz-srctag">{o.source}</span>}<span className={"hz-pay " + o.payment}>{o.payment === "paid" ? "Paid" : o.payment === "pending" ? "Verify payment" : "Unpaid"}</span></div>
               <div className="hz-mmeta"><span><T.icon size={12} />{T.label}</span><span><User size={12} />{o.customer}</span><span>{del ? <Bike size={12} /> : <Users size={12} />}{o.waiter}</span><span><Clock size={12} />{clock(o.createdAt)}</span></div>
               <div className="hz-mitems">{o.items.map((i) => `${i.qty}× ${i.name}`).join(" · ")}</div>
+              {o.payProof && <ProofView src={o.payProof} q={o.q} />}
               <div className="hz-mfoot"><b>{rs(grand(o))}</b>{ACTIVE(o.status) && <span className="hz-eta">ETA {etaMins(o)}m</span>}
                 <div className="hz-macts">
                   <button className="hz-printbtn" onClick={() => doPrint(o)}><Receipt size={13} />{o.status === "new" ? "Print" : "Re-print"}</button>
@@ -1888,6 +2004,9 @@ function ManagerOps({ ctx, branch, onPrint }) {
                   tapping one updates their screen live. */}
               {o.status !== "completed" && <StageIcons o={o} ctx={ctx} />}
               </div>
+              {/* Staff can keep adding items to a running order (extra drinks, etc.)
+                  until it's completed. Not available to online customers. */}
+              {ACTIVE(o.status) && <AddItemsBar o={o} ctx={ctx} />}
             </div>); })}</div>
             </div>
           ))}
@@ -2630,6 +2749,24 @@ const CSS = `
 .hz-back{padding:9px 12px;border-radius:9px;font-size:12.5px;font-weight:600;color:var(--muted);background:var(--surface2);border:1px solid var(--border);}
 .hz-back.wide{flex:1;text-align:center;}.hz-back.center{display:block;margin:14px auto 0;}
 
+/* Add-items strip on a running order */
+.hz-additems-open{margin-top:10px;}
+.hz-additems-btn{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:700;color:var(--ember);background:color-mix(in srgb,var(--ember) 8%,transparent);border:1px dashed var(--ember);border-radius:9px;padding:7px 12px;cursor:pointer;}
+.hz-additems-btn:hover{background:color-mix(in srgb,var(--ember) 14%,transparent);}
+.hz-additems{margin-top:10px;background:var(--surface2);border:1px solid var(--border);border-radius:12px;padding:10px;}
+.hz-additems-h{display:flex;justify-content:space-between;align-items:center;font-size:12px;font-weight:800;color:var(--text);margin-bottom:8px;}
+.hz-additems-h span{display:flex;align-items:center;gap:6px;}
+.hz-additems-h svg{color:var(--ember);}
+.hz-additems-list{max-height:210px;overflow-y:auto;display:flex;flex-direction:column;gap:2px;}
+.hz-additems-row{display:flex;align-items:center;gap:8px;padding:6px 4px;border-bottom:1px solid var(--border);}
+.hz-ai-name{flex:1;font-size:12.5px;font-weight:600;color:var(--text);min-width:0;}
+.hz-ai-price{font-size:11.5px;color:var(--muted);font-weight:600;white-space:nowrap;}
+.hz-ai-qty{display:flex;align-items:center;gap:8px;flex-shrink:0;}
+.hz-ai-qty button{width:26px;height:26px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:16px;font-weight:700;line-height:1;cursor:pointer;}
+.hz-ai-qty button:disabled{opacity:.35;cursor:not-allowed;}
+.hz-ai-qty b{min-width:16px;text-align:center;font-size:13px;}
+.hz-additems-confirm{width:100%;margin-top:9px;display:inline-flex;align-items:center;justify-content:center;gap:6px;height:38px;border-radius:9px;font-size:12.5px;font-weight:700;color:#0c0a08;background:linear-gradient(135deg,var(--jade),var(--saffron));border:0;cursor:pointer;}
+.hz-additems-confirm:disabled{opacity:.45;cursor:not-allowed;}
 .hz-worder{background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:14px;}
 .hz-worder.ready{border-color:var(--jade);box-shadow:0 0 0 1px var(--jade);}
 .hz-deliverto{display:flex;align-items:center;gap:7px;font-size:12.5px;margin:9px 0;color:var(--muted);}
@@ -2694,6 +2831,20 @@ const CSS = `
 .hz-cosum b{font-family:var(--fm);color:var(--text);}
 .hz-cosum-t{border-top:1px solid var(--border);padding-top:8px;font-weight:700;color:var(--text)!important;}
 .hz-paypick{display:grid;grid-template-columns:1fr 1fr;gap:9px;}
+.hz-payinfo{background:var(--surface2);border:1px solid var(--border);border-radius:13px;padding:14px;display:flex;flex-direction:column;gap:8px;}
+.hz-payinfo-h{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:800;color:var(--text);margin-bottom:2px;}
+.hz-payinfo-h svg{color:var(--ember);}
+.hz-payinfo-row{display:flex;justify-content:space-between;align-items:center;font-size:12.5px;color:var(--muted);}
+.hz-payinfo-row b{color:var(--text);font-weight:700;}
+.hz-payinfo-row b.hz-acct{font-family:var(--fm,monospace);letter-spacing:.02em;font-size:14px;}
+.hz-payinfo-amt{display:flex;justify-content:space-between;align-items:center;border-top:1px dashed var(--border);margin-top:4px;padding-top:8px;font-size:13px;}
+.hz-payinfo-amt b{color:var(--ember);font-weight:800;font-size:16px;}
+.hz-payproof{display:block;cursor:pointer;margin-top:4px;}
+.hz-proof-ph{display:flex;flex-direction:column;align-items:center;gap:6px;padding:16px;border:1.5px dashed var(--border);border-radius:11px;color:var(--muted);font-size:12px;font-weight:600;text-align:center;transition:.15s;}
+.hz-proof-ph:hover{border-color:var(--ember);color:var(--ember);}
+.hz-proof-done{display:flex;align-items:center;gap:10px;padding:8px;border:1px solid var(--jade);border-radius:11px;background:color-mix(in srgb,var(--jade) 8%,transparent);}
+.hz-proof-done img{width:46px;height:46px;object-fit:cover;border-radius:8px;flex-shrink:0;}
+.hz-proof-done span{display:flex;align-items:center;gap:5px;font-size:12px;font-weight:700;color:var(--jade);}
 .hz-payopt{display:inline-flex;align-items:center;gap:7px;justify-content:center;padding:12px;border-radius:11px;font-size:12.5px;font-weight:600;background:var(--surface);border:1px solid var(--border);color:var(--muted);transition:.15s;}
 .hz-payopt.on{color:var(--text);border-color:var(--ember);background:color-mix(in srgb,var(--ember) 8%,var(--surface));}
 .hz-payopt.on svg{color:var(--ember);}
@@ -2817,7 +2968,7 @@ const CSS = `
 .hz-wp-av.sm{width:32px;height:32px;font-size:14px;border-radius:9px;color:#fff;}
 .hz-mrow,.hz-billrow{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:12px;}
 .hz-myorder{display:block;width:100%;text-align:left;background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:12px;font:inherit;color:inherit;cursor:pointer;transition:.2s;}
-.hz-myorder:hover{border-color:color-mix(in srgb,var(--ember) 40%,var(--border));transform:translateY(-2px);}
+.hz-myorder:hover{border-color:color-mix(in srgb,var(--ember) 40%,var(--border));}
 .hz-clearhist{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;margin-top:16px;padding:10px;border-radius:10px;font-size:12.5px;font-weight:600;color:var(--muted);background:transparent;border:1px dashed var(--border);}
 .hz-clearhist:hover{color:#FF5470;border-color:#FF547055;}
 .hz-mhead{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap;}
@@ -2904,7 +3055,7 @@ const CSS = `
 .hz-ostep-h{font-family:var(--fd);font-weight:700;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:6px 0 11px;}
 .hz-modecards{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:22px;}
 .hz-modecard{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:5px;padding:18px;border-radius:16px;background:var(--surface);border:1.5px solid var(--border);text-align:left;transition:.18s;}
-.hz-modecard:hover{transform:translateY(-2px);}
+.hz-modecard:hover{border-color:color-mix(in srgb,var(--ember) 30%,var(--border));}
 .hz-modecard.on{border-color:var(--ember);background:color-mix(in srgb,var(--ember) 7%,var(--surface));}
 .hz-modeic{width:48px;height:48px;border-radius:13px;display:grid;place-items:center;color:var(--ember);background:color-mix(in srgb,var(--ember) 13%,transparent);margin-bottom:6px;}
 .hz-modecard b{font-family:var(--fd);font-size:16px;}
@@ -2912,7 +3063,7 @@ const CSS = `
 .hz-modecheck{position:absolute;top:14px;right:14px;color:#fff;background:var(--ember);border-radius:50%;padding:3px;width:22px;height:22px;}
 .hz-branchcards{display:flex;flex-direction:column;gap:10px;margin-bottom:22px;}
 .hz-branchcard{display:flex;align-items:center;gap:13px;padding:15px;border-radius:15px;background:var(--surface);border:1.5px solid var(--border);text-align:left;transition:.16s;}
-.hz-branchcard:hover{transform:translateY(-2px);}
+.hz-branchcard:hover{border-color:color-mix(in srgb,var(--ember) 30%,var(--border));}
 .hz-branchcard.on{border-color:var(--ember);background:color-mix(in srgb,var(--ember) 7%,var(--surface));}
 .hz-branch-ic{width:44px;height:44px;border-radius:12px;display:grid;place-items:center;color:var(--saffron);background:color-mix(in srgb,var(--saffron) 14%,transparent);flex-shrink:0;}
 .hz-branch-info{flex:1;min-width:0;}
@@ -2976,7 +3127,7 @@ const CSS = `
 :where(.hz-kpis,.hz-mkpis,.hz-mgrid,.hz-staffgrid,.hz-kcols,.hz-menugrid2,.hz-stack,.hz-catpills,.hz-modecards,.hz-branchcards)>*:nth-child(n+6){animation-delay:.27s;}
 .hz-head,.hz-segt.wide,.hz-segt.wide4{animation:hzUp .5s .04s cubic-bezier(.2,.7,.2,1) backwards;}
 .hz-card,.hz-ticket,.hz-worder,.hz-mrow,.hz-billrow,.hz-fcard,.hz-kpi,.hz-loginbox,.hz-mitemrow,.hz-userrow,.hz-reqrow,.hz-modecard,.hz-branchcard{box-shadow:0 1px 2px color-mix(in srgb,var(--ember) 6%,rgba(0,0,0,.05)),0 16px 32px -22px color-mix(in srgb,var(--ember) 22%,rgba(0,0,0,.65));transition:box-shadow .22s cubic-bezier(.2,.7,.2,1),transform .22s cubic-bezier(.2,.7,.2,1),border-color .2s;}
-.hz-modecard:hover,.hz-branchcard:hover{transform:translateY(-3px);border-color:color-mix(in srgb,var(--ember) 35%,var(--border));box-shadow:0 4px 10px color-mix(in srgb,var(--ember) 8%,rgba(0,0,0,.06)),0 22px 40px -20px color-mix(in srgb,var(--ember) 30%,rgba(0,0,0,.7));}
+.hz-modecard:hover,.hz-branchcard:hover{border-color:color-mix(in srgb,var(--ember) 35%,var(--border));box-shadow:0 4px 10px color-mix(in srgb,var(--ember) 8%,rgba(0,0,0,.06)),0 22px 40px -20px color-mix(in srgb,var(--ember) 22%,rgba(0,0,0,.6));}
 .hz[data-theme="light"] .hz-card,.hz[data-theme="light"] .hz-fcard,.hz[data-theme="light"] .hz-kpi,.hz[data-theme="light"] .hz-loginbox,.hz[data-theme="light"] .hz-modecard,.hz[data-theme="light"] .hz-branchcard{box-shadow:0 1px 2px rgba(120,80,40,.06),0 18px 36px -24px rgba(120,70,30,.45);}
 .hz-bar::after,.hz-obar::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1.5px;background:linear-gradient(90deg,transparent,var(--ember),var(--saffron),transparent);background-size:200% 100%;animation:barSlide 7s linear infinite;opacity:.55;}
 .hz-cta,.hz-floatcart,.hz-onlinecta{position:relative;overflow:hidden;}
@@ -3057,7 +3208,7 @@ const CSS = `
 .hz-obar .hz-icbtn{margin-left:0;}
 .hz-modetabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px;}
 .hz-modetab{display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:13px 8px;border-radius:13px;font-size:13px;font-weight:700;background:var(--surface);border:1.5px solid var(--border);color:var(--muted);transition:.16s;position:relative;}
-.hz-modetab:hover{transform:translateY(-2px);}
+.hz-modetab:hover{border-color:color-mix(in srgb,var(--ember) 30%,var(--border));}
 .hz-modetab.on{color:#fff;background:linear-gradient(135deg,var(--ember),var(--saffron));border-color:transparent;box-shadow:0 8px 22px -10px var(--ember);}
 .hz-modetab em{font-style:normal;font-size:8.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;background:var(--saffron);color:#1a1410;padding:1px 5px;border-radius:5px;position:absolute;top:-6px;right:8px;}
 .hz-ctxbar{display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:10px 13px;margin-bottom:12px;}
@@ -3146,7 +3297,29 @@ const CSS = `
 .hz-stageicon.done{background:color-mix(in srgb,var(--jade) 18%,transparent);border-color:var(--jade);color:var(--jade);}
 .hz-stageicon.cur{background:var(--jade);border-color:var(--jade);color:#0c0a08;box-shadow:0 0 0 3px color-mix(in srgb,var(--jade) 25%,transparent);}
 .hz-stageicon.clickable{cursor:pointer;}
-.hz-stageicon.clickable:hover{transform:scale(1.12);border-color:var(--ember);}
+.hz-stageicon.clickable:hover{border-color:var(--ember);background:color-mix(in srgb,var(--ember) 12%,transparent);}
+
+/* Payment proof thumbnail on staff order cards */
+.hz-proofthumb{display:flex;align-items:center;gap:9px;width:100%;margin:8px 0 2px;padding:7px;border:1px solid var(--border);border-radius:10px;background:var(--surface2);cursor:pointer;text-align:left;}
+.hz-proofthumb:hover{border-color:var(--ember);}
+.hz-proofthumb img{width:40px;height:40px;object-fit:cover;border-radius:7px;flex-shrink:0;}
+.hz-proofthumb span{display:flex;align-items:center;gap:5px;font-size:11.5px;font-weight:600;color:var(--muted);}
+.hz-prooflightbox{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.8);display:grid;place-items:center;padding:20px;}
+.hz-prooflb-inner{background:var(--surface);border-radius:14px;max-width:min(440px,92vw);max-height:88vh;overflow:auto;padding:14px;}
+.hz-prooflb-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
+.hz-prooflb-h b{font-size:13px;}
+.hz-prooflb-h button{color:var(--muted);}
+.hz-prooflb-inner img{width:100%;border-radius:8px;display:block;}
+
+/* --- Calmer hover: no scaling/rotating/lifting that makes icons "jitter" --- */
+.hz-stageicon.clickable:hover,
+.hz-addbtn2:hover,
+.hz-fcard:hover,
+.hz-fcard:hover .hz-fcard-img img,.hz-fcard:hover .hz-fcard-em,
+.hz-myorder:hover,.hz-modecard:hover,.hz-branchcard:hover,.hz-modetab:hover{transform:none !important;}
+/* keep a gentle, non-moving highlight instead */
+.hz-fcard:hover{border-color:color-mix(in srgb,var(--ember) 40%,var(--border));}
+.hz-mini,.hz-printbtn,.hz-stageicon{will-change:auto;}
 .hz-stageicon:disabled{cursor:default;}
 .hz-stageline{flex:1;min-width:8px;height:2px;background:var(--border);margin:0 -1px;}
 .hz-stageline.done{background:var(--jade);}
@@ -3170,12 +3343,6 @@ const CSS = `
 .hz-track-sumrow.total{font-size:16px;font-weight:800;color:var(--text);margin-top:4px;padding-top:8px;border-top:1px solid var(--border);}
 .hz-track-sumrow.total span:last-child{color:var(--ember);}
 .hz-pay.bare{display:inline-flex;margin:12px 0 0;}
-.hz-paydetails{margin-top:10px;padding:12px 14px;border-radius:12px;background:color-mix(in srgb,#9B8CFF 10%,transparent);border:1px solid color-mix(in srgb,#9B8CFF 30%,transparent);}
-.hz-paydetails-h{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:800;color:#9B8CFF;text-transform:uppercase;letter-spacing:.03em;margin-bottom:8px;}
-.hz-paydetails-row{display:flex;justify-content:space-between;gap:10px;font-size:13px;padding:3px 0;color:var(--text);}
-.hz-paydetails-row span{color:var(--muted);}
-.hz-paydetails-row b{font-family:var(--fm);}
-.hz-paydetails-note{margin-top:8px;padding-top:8px;border-top:1px dashed color-mix(in srgb,#9B8CFF 30%,transparent);font-size:11.5px;color:var(--muted);line-height:1.4;}
 .hz-track.flash{animation:hzFlash .9s ease;}
 .hz-track-hero{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding-bottom:14px;border-bottom:1px solid var(--border);margin-bottom:14px;}
 .hz-th-q{font-size:12px;color:var(--muted);font-weight:600;}
@@ -3212,7 +3379,9 @@ const CSS = `
 .hz-costin{display:flex;align-items:center;gap:7px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding-left:11px;min-width:0;}
 .hz-costin:focus-within{border-color:var(--ember);box-shadow:0 0 0 3px color-mix(in srgb,var(--ember) 16%,transparent);}
 .hz-costin em{font-style:normal;font-size:12px;font-weight:700;color:var(--muted);font-family:var(--fm);flex-shrink:0;}
-.hz-costin input{border:none;background:transparent;padding-left:0;box-shadow:none!important;}
+/* the Rs input sits INSIDE .hz-costin, so it must have no box of its own —
+   otherwise you see a border-in-a-border ("double box"). */
+.hz-stockform .hz-costin input{border:none!important;background:transparent!important;padding:10px 0!important;box-shadow:none!important;border-radius:0!important;}
 .hz-sf-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:39px;padding:0 16px;border-radius:10px;font-size:13px;font-weight:700;color:#0c0a08;white-space:nowrap;background:linear-gradient(135deg,var(--jade),var(--saffron));transition:.15s;}
 .hz-sf-btn:hover:not(:disabled){filter:brightness(1.07);}
 .hz-sf-btn:disabled{opacity:.45;cursor:not-allowed;}
