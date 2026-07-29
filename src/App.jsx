@@ -376,6 +376,7 @@ export default function App() {
      false), this whole block quietly does nothing and the app behaves
      exactly like before — local-only demo data.                    */
   const remoteMetaRef = useRef(null);
+  const metaLoadedRef = useRef(false);   // true once the server's meta doc has arrived — writes are gated on this
 
   // Seed Firestore once (first device ever to connect) so every later
   // device — instead of generating its own random demo history — reads
@@ -444,6 +445,7 @@ export default function App() {
         if (d.requests) setRequests(d.requests);
         if (d.branchOpen) setBranchOpen(d.branchOpen);
       }
+      metaLoadedRef.current = true;   // server data is in — writes are now safe
       setOnline(true);
     }, (e) => { console.error("Firestore meta listen failed", e); });
     return () => { unsubOrders(); unsubUsers(); unsubNotifs(); unsubMeta(); };
@@ -456,11 +458,16 @@ export default function App() {
   // devices can never overwrite one another.
   useEffect(() => {
     if (!FIREBASE_READY) return;
+    /* CRITICAL: do NOT write until we've received the real meta document from
+       the server at least once. Without this guard the very first render —
+       where menu/inventory still hold their built-in SEED_* defaults — would
+       immediately overwrite the server copy with those defaults, erasing every
+       menu item and stock change made earlier. That was the "edit shows, then
+       reverts on refresh" bug: each load was silently re-seeding the database. */
+    if (!metaLoadedRef.current) return;
     const current = { menu, inventory, purchases, requests, branchOpen };
     const json = JSON.stringify(current);
     if (json === JSON.stringify(remoteMetaRef.current)) return;
-    /* Update our local "known remote" copy BEFORE writing, so if the write's
-       own snapshot slips through it compares equal and doesn't re-apply. */
     remoteMetaRef.current = current;
     setDoc(doc(db, "hunza", "meta"), sanitize(current), { merge: true }).catch((e) => console.error("Firestore meta write failed", e));
   }, [menu, inventory, purchases, requests, branchOpen]);
