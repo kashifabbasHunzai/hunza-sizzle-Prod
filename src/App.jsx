@@ -1410,6 +1410,15 @@ function Track({ o, ctx, onNew }) {
             <div className="hz-track-sumrow total"><span>Total</span><span>{rs(grand(o))}</span></div>
           </div>
           <div className={"hz-pay bare " + o.payment}>{o.payment === "paid" ? "Paid" : o.payment === "pending" ? "Payment pending verification" : "Pay on " + (o.type === "delivery" ? "delivery" : "collection")}</div>
+          {o.payment === "pending" && (
+            <div className="hz-paydetails">
+              <div className="hz-paydetails-h"><ShieldCheck size={14} />Sent payment to</div>
+              <div className="hz-paydetails-row"><span>Account title</span><b>Hassan Khan</b></div>
+              <div className="hz-paydetails-row"><span>Account number</span><b>0348-8503582</b></div>
+              <div className="hz-paydetails-row"><span>Banks</span><b>EasyPaisa · JazzCash</b></div>
+              <div className="hz-paydetails-note">If you haven't sent it yet, send {rs(grand(o))} to this number — staff will verify it shortly.</div>
+            </div>
+          )}
         </div>
       </div>
       <button className="hz-back wide center" onClick={onNew}>+ Place another order</button>
@@ -1587,6 +1596,15 @@ function OrderCheckout({ ctx, mode, branch, table, spotPrefill, items, sum, onBa
           <button className={"hz-payopt" + (pay === "cod" ? " on" : "")} onClick={() => setPay("cod")}><Banknote size={16} />{delivery ? "Cash on Delivery" : "Cash at counter"}{branch === TAX_BRANCH && <em className="hz-taxhint">+16% tax</em>}</button>
           <button className={"hz-payopt" + (pay === "card" ? " on" : "")} onClick={() => setPay("card")}><CreditCard size={16} />Online Payment{branch === TAX_BRANCH && <em className="hz-taxhint save">+5% tax</em>}</button>
         </div>
+        {pay === "card" && (
+          <div className="hz-paydetails">
+            <div className="hz-paydetails-h"><ShieldCheck size={14} />Send payment to</div>
+            <div className="hz-paydetails-row"><span>Account title</span><b>Hassan Khan</b></div>
+            <div className="hz-paydetails-row"><span>Account number</span><b>0348-8503582</b></div>
+            <div className="hz-paydetails-row"><span>Banks</span><b>EasyPaisa · JazzCash</b></div>
+            <div className="hz-paydetails-note">Send {rs(payable)} to this number, then place your order. Staff will verify the payment before it's marked as paid.</div>
+          </div>
+        )}
         {branch === TAX_BRANCH && <div className="hz-branchnote"><Receipt size={12} />Pay by card and save {rs(taxOf(branch, "cod", sum + fee) - taxOf(branch, "card", sum + fee))}<InfoTip label="About sales tax">Sales tax at {branchName(TAX_BRANCH)} is 16% on cash payments but only 5% on card or online payments, so paying by card costs you less.</InfoTip></div>}
         {err && <div className="hz-err"><CircleAlert size={13} />{err}</div>}
         <div className="hz-corow"><button className="hz-back wide" onClick={onBack}>← Menu</button>
@@ -3152,6 +3170,12 @@ const CSS = `
 .hz-track-sumrow.total{font-size:16px;font-weight:800;color:var(--text);margin-top:4px;padding-top:8px;border-top:1px solid var(--border);}
 .hz-track-sumrow.total span:last-child{color:var(--ember);}
 .hz-pay.bare{display:inline-flex;margin:12px 0 0;}
+.hz-paydetails{margin-top:10px;padding:12px 14px;border-radius:12px;background:color-mix(in srgb,#9B8CFF 10%,transparent);border:1px solid color-mix(in srgb,#9B8CFF 30%,transparent);}
+.hz-paydetails-h{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:800;color:#9B8CFF;text-transform:uppercase;letter-spacing:.03em;margin-bottom:8px;}
+.hz-paydetails-row{display:flex;justify-content:space-between;gap:10px;font-size:13px;padding:3px 0;color:var(--text);}
+.hz-paydetails-row span{color:var(--muted);}
+.hz-paydetails-row b{font-family:var(--fm);}
+.hz-paydetails-note{margin-top:8px;padding-top:8px;border-top:1px dashed color-mix(in srgb,#9B8CFF 30%,transparent);font-size:11.5px;color:var(--muted);line-height:1.4;}
 .hz-track.flash{animation:hzFlash .9s ease;}
 .hz-track-hero{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding-bottom:14px;border-bottom:1px solid var(--border);margin-bottom:14px;}
 .hz-th-q{font-size:12px;color:var(--muted);font-weight:600;}
