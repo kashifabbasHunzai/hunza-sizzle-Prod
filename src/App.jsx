@@ -415,7 +415,6 @@ export default function App() {
     if (!FIREBASE_READY) return;
     const unsubOrders = onSnapshot(collection(db, "orders"), (snap) => {
       setOrders(snap.docs.map((d) => d.data()));
-      setOnline(true);
     }, (e) => { console.error("Firestore orders listen failed", e); });
     /* Staff/users get the same one-document-per-record treatment as orders —
        they used to live as one array inside the shared "meta" doc, which
@@ -424,7 +423,6 @@ export default function App() {
        after being created because another device's stale write landed after). */
     const unsubUsers = onSnapshot(collection(db, "users"), (snap) => {
       setUsers(snap.docs.map((d) => d.data()));
-      setOnline(true);
     }, (e) => { console.error("Firestore users listen failed", e); });
     const unsubNotifs = onSnapshot(query(collection(db, "notifs"), orderBy("time", "desc"), limit(60)), (snap) => {
       setNotifs(snap.docs.map((d) => d.data()));
@@ -732,19 +730,19 @@ export default function App() {
     toast(`${monthLong(month)} marked unpaid · ${u?.name}`, "#FF5470");
   };
 
-  const addStock = (id, qty) => setInventory((p) => p.map((it) => it.id === id ? { ...it, stock: +(it.stock + qty).toFixed(1) } : it));
+  const addStock = (id, qty) => setInventory((p) => p.map((it) => it.id === id ? { ...it, stock: +(it.stock + qty).toFixed(1), ...stamp() } : it));
   const updateInventory = (id, patch) => { setInventory((p) => p.map((it) => it.id === id ? { ...it, ...patch, ...stamp() } : it)); toast(`Item updated · ${patch.name || ""}`, "#5A9CFF"); };
   const deleteInventory = (id) => { const it = inventory.find((x) => x.id === id); setInventory((p) => p.filter((x) => x.id !== id)); toast(`Item removed · ${it?.name || ""}`, "#FF5470"); };
   // create-or-add by free-text name (no fixed list)
   const restock = (branch, name, unit, qty, low) => setInventory((p) => {
     const i = p.findIndex((x) => x.branch === branch && x.name.toLowerCase() === name.trim().toLowerCase());
-    if (i >= 0) { const c = [...p]; c[i] = { ...c[i], stock: +(c[i].stock + qty).toFixed(1) }; return c; }
-    return [...p, { id: branch + "-x" + now() + Math.random().toString(36).slice(2, 6), branch, name: name.trim(), unit: unit || "units", stock: qty, low: low || Math.max(1, Math.round(qty * 0.4)) }];
+    if (i >= 0) { const c = [...p]; c[i] = { ...c[i], stock: +(c[i].stock + qty).toFixed(1), ...stamp() }; return c; }
+    return [...p, { id: branch + "-x" + now() + Math.random().toString(36).slice(2, 6), branch, name: name.trim(), unit: unit || "units", stock: qty, low: low || Math.max(1, Math.round(qty * 0.4)), addedBy: session ? session.name : "System", addedAt: now(), ...stamp() }];
   });
   // Adds stock AND records what was paid, so the dashboard can show cost.
   const buyStock = (branch, name, unit, qty, cost, by) => {
     restock(branch, name, unit, qty);
-    setPurchases((p) => [{ id: "pu" + now() + Math.random().toString(36).slice(2, 6), branch, item: name.trim(), unit: unit || "units", qty, cost: cost || 0, by: by || "Staff", date: now() }, ...p]);
+    setPurchases((p) => [{ id: "pu" + now() + Math.random().toString(36).slice(2, 6), branch, item: name.trim(), unit: unit || "units", qty, cost: cost || 0, by: by || (session ? session.name : "Staff"), date: now() }, ...p]);
     toast(`Stock in: +${qty} ${unit || "units"} ${name.trim()}${cost ? " · " + rs(cost) : ""} (${branchName(branch)})`, "#29D3A6");
   };
   const addRequest = (req) => { const id = "r" + (++rref.current); setRequests((p) => [{ id, status: "pending", createdAt: now(), ...req }, ...p]); toast(`Stock request → admin: ${req.qty} ${req.unit} ${req.item}`, "#FFB22C"); };
@@ -866,10 +864,22 @@ export default function App() {
       </header>
 
       <main className="hz-screen" key={session.role + (session.branch || "")}>
+        {/* Until the first live data arrives from Firestore, the screens would
+            briefly show the built-in seed data and then snap to the real data
+            (the "flash of old data for ~1s on refresh"). Show a small loader
+            instead so staff only ever see the true, synced numbers. */}
+        {FIREBASE_READY && !online ? (
+          <div className="hz-syncing">
+            <div className="hz-syncing-spin" />
+            <b>Loading live data…</b>
+            <span>Syncing with all devices</span>
+          </div>
+        ) : (<>
         {(session.role === "admin" || session.role === "manager") && <Manager ctx={ctx} isAdmin={session.role === "admin"} myBranch={session.branch} onPreview={(b, opts) => setPreview({ branch: b, table: opts?.table || "", kind: opts?.kind || "dine", spot: opts?.spot || "" })} />}
         {session.role === "waiter" && <Waiter ctx={ctx} me={session.name} branch={session.branch} />}
         {session.role === "rider" && <Rider ctx={ctx} me={session.name} branch={session.branch} />}
         {session.role === "cashier" && <Cashier ctx={ctx} branch={session.branch} />}
+        </>)}
       </main>
       <Toasts toasts={toasts} />
     </div>
@@ -1054,6 +1064,8 @@ function Toasts({ toasts }) {
   ))}</div>;
 }
 const ago = (ms) => { const s = Math.floor((now() - ms) / 1000); if (s < 60) return "just now"; const m = Math.floor(s / 60); if (m < 60) return m + "m ago"; const h = Math.floor(m / 60); return h + "h ago"; };
+/* Short absolute date+time for inventory audit lines, e.g. "12 Jan, 3:40 PM". */
+const dateShort = (ts) => { if (!ts) return ""; const d = new Date(ts); return d.toLocaleDateString("en-GB", { day: "2-digit", month: "short" }) + ", " + d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }); };
 /* Bell in the staff header. Shows only the notifications addressed to this
    person: matching role, and (when set) matching name and branch. */
 function NotifBell({ notifs, session }) {
@@ -1934,12 +1946,10 @@ function ManagerOps({ ctx, branch, onPrint }) {
     { id: "all", label: "All", test: () => true },
   ];
   const dayTest = DAY_FILTERS.find((d) => d.id === dayFilter).test;
-  /* Any order still in progress (new/preparing/ready) always stays visible
-     regardless of the date filter — an active order from yesterday must
-     never silently disappear just because "Today" is selected. Completed/
-     cancelled orders, on the other hand, strictly follow the date filter so
-     old and new history don't pile up together undated. */
-  const all = ctx.orders.filter(inB).filter((o) => ACTIVE(o.status) || dayTest(o.createdAt)).sort((a, b) => (dayStart(b.createdAt) - dayStart(a.createdAt)) || (b.priority - a.priority) || (a.createdAt - b.createdAt));
+  /* Each tab shows exactly its own period. Active (in-progress) orders are only
+     force-included in the "Today" tab — so an order still cooking is never lost —
+     but they don't leak into Yesterday/Last-7 views, which stay clean and dated. */
+  const all = ctx.orders.filter(inB).filter((o) => (dayFilter === "today" && ACTIVE(o.status)) || dayTest(o.createdAt)).sort((a, b) => (dayStart(b.createdAt) - dayStart(a.createdAt)) || (b.priority - a.priority) || (a.createdAt - b.createdAt));
   const active = all.filter((o) => ACTIVE(o.status));
   const revenue = all.reduce((a, b) => a + grand(b), 0);
   const lowStock = ctx.inventory.filter((i) => (branch === "all" || i.branch === branch) && i.stock <= i.low).length;
@@ -2064,13 +2074,21 @@ function Inventory({ ctx, branch, isAdmin }) {
               <button className="hz-sf-btn" disabled={!nm.trim() || !(+qty > 0)} onClick={addStock}><Plus size={15} />Add stock</button>
             </div>
           </div>
-          <div className="hz-invgrid">{inv.map((it) => { const lowFlag = it.stock <= it.low; const max = Math.max(it.low * 1.6, it.stock); const c = lastCost(it.name, it.branch);
+          <div className="hz-invgrid">{inv.map((it) => { const lowFlag = it.stock <= it.low; const c = lastCost(it.name, it.branch);
             if (editId === it.id) return <InvEditRow key={it.id} it={it} onCancel={() => setEditId(null)} onSave={(patch) => { ctx.updateInventory(it.id, patch); setEditId(null); }} />;
-            return (<div className="hz-invrow" key={it.id}>
-              <Package size={16} className="hz-stock-ic" style={lowFlag ? { color: "var(--rose)" } : {}} />
-              <div className="hz-load-main"><div className="hz-load-top"><b>{it.name}</b>{branch === "all" && <BranchTag b={it.branch} />}{lowFlag && <span className="hz-lowtag">low</span>}<span className="hz-stockval">{it.stock} {it.unit}</span>{c > 0 && <span className="hz-unitcost">~{rs(Math.round(c))}/{it.unit}</span>}</div>
-                <div className={"hz-bar" + (lowFlag ? " warn" : "")}><span style={{ width: Math.min(100, (it.stock / max) * 100) + "%" }} /></div>
-                <EditedBy item={it} /></div>
+            return (<div className={"hz-invrow2" + (lowFlag ? " low" : "")} key={it.id}>
+              <div className="hz-inv-ic"><Package size={17} /></div>
+              <div className="hz-inv-main">
+                <div className="hz-inv-top"><b>{it.name}</b>{branch === "all" && <BranchTag b={it.branch} />}{lowFlag && <span className="hz-lowtag">LOW</span>}</div>
+                <div className="hz-inv-meta">
+                  {it.addedBy && <span><Plus size={11} />Added by {it.addedBy}{it.addedAt ? ` · ${dateShort(it.addedAt)}` : ""}</span>}
+                  {it.editedBy && it.editedAt && <span><Pencil size={11} />Edited by {it.editedBy} · {dateShort(it.editedAt)}</span>}
+                </div>
+              </div>
+              <div className="hz-inv-right">
+                <div className="hz-inv-stock"><b className={lowFlag ? "low" : ""}>{it.stock}</b><span>{it.unit}</span></div>
+                {c > 0 && <div className="hz-inv-cost">~{rs(Math.round(c))}/{it.unit}</div>}
+              </div>
               <div className="hz-qadd2"><button onClick={() => ctx.addStock(it.id, 5)}>+5</button><button onClick={() => ctx.addStock(it.id, 10)}>+10</button></div>
               <div className="hz-macts"><button className="hz-mini" title="Edit item" aria-label="Edit item" onClick={() => setEditId(it.id)}><Pencil size={13} /></button><button className="hz-mini danger" title="Remove item" aria-label="Remove item" onClick={() => { if (askConfirm(`Remove "${it.name}" from inventory?`)) ctx.deleteInventory(it.id); }}><Trash2 size={13} /></button></div>
             </div>); })}
@@ -2316,6 +2334,16 @@ function Payroll({ ctx, isAdmin, myBranch, branch }) {
   const totSal = staff.reduce((a, b) => a + (b.salary || 0), 0);
   const totAdv = staff.reduce((a, b) => a + advTotal(b), 0);
   const pendingThisMonth = staff.filter((u) => !paidMonths(u).has(curKey)).reduce((a, b) => a + (b.salary || 0), 0);
+  /* Bring stock spending into the payroll view so the owner sees the whole
+     monthly outgoing picture: salaries actually paid + money spent on stock,
+     and what salary is still pending. "Saved / remaining" = the salaries not
+     yet paid out this month (money still in hand for wages). */
+  const scopeB = isAdmin ? branch : myBranch;
+  const inScope = (b) => scopeB === "all" || b === scopeB;
+  const salaryPaidThisMonth = staff.reduce((a, u) => a + (u.payments || []).filter((p) => p.month === curKey).reduce((x, p) => x + p.amount, 0), 0);
+  const stockThisMonth = (ctx.purchases || []).filter((p) => inScope(p.branch) && isThisMonth(p.date)).reduce((a, b) => a + b.cost, 0);
+  const advThisMonth = staff.reduce((a, u) => a + (u.advances || []).filter((ad) => isThisMonth(ad.date)).reduce((x, ad) => x + ad.amount, 0), 0);
+  const outThisMonth = salaryPaidThisMonth + stockThisMonth + advThisMonth;
   const open = (u, mode) => { setEdit({ id: u.id, mode }); setVal(mode === "paymonth" ? String(u.salary || "") : ""); setNote(""); setPm(curKey); };
   const save = (u) => {
     const amt = +val;
@@ -2331,6 +2359,18 @@ function Payroll({ ctx, isAdmin, myBranch, branch }) {
         <Kpi icon={Wallet} label="Monthly Payroll" val={rs(totSal)} c="#5A9CFF" />
         <Kpi icon={Receipt} label={`${monthShort(curKey)} Pending`} val={rs(pendingThisMonth)} c="#FF5470" />
         <Kpi icon={Banknote} label="Advances Out" val={rs(totAdv)} c="#FFB22C" />
+      </div>
+      {/* Whole-month money-out picture: salaries paid + stock bought this month.
+          Gives the owner "kitni salary gayi, kitna maal pe kharch, kitna bacha". */}
+      <div className="hz-card hz-outsum">
+        <div className="hz-card-h"><h3>{monthShort(curKey)} spending · {scopeLabel}</h3><span className="hz-card-sub">salary + stock this month</span></div>
+        <div className="hz-outgrid">
+          <div className="hz-outcell"><span className="hz-out-ic" style={{ color: "#5A9CFF" }}><Wallet size={15} /></span><div><b>{rs(salaryPaidThisMonth)}</b><span>Salary paid</span></div></div>
+          <div className="hz-outcell"><span className="hz-out-ic" style={{ color: "#FFB22C" }}><Banknote size={15} /></span><div><b>{rs(advThisMonth)}</b><span>Advances given</span></div></div>
+          <div className="hz-outcell"><span className="hz-out-ic" style={{ color: "#FF5470" }}><Boxes size={15} /></span><div><b>{rs(stockThisMonth)}</b><span>Stock bought</span></div></div>
+          <div className="hz-outcell total"><span className="hz-out-ic" style={{ color: "#29D3A6" }}><TrendingUp size={15} /></span><div><b>{rs(outThisMonth)}</b><span>Total out this month</span></div></div>
+        </div>
+        <div className="hz-outnote"><Receipt size={12} />Salary still to pay this month: <b>{rs(pendingThisMonth)}</b> — keep this aside for wages.</div>
       </div>
       <div className="hz-card">
         <div className="hz-card-h"><h3>Payroll · {scopeLabel}</h3><span className="hz-card-sub">{staff.length} staff · tap a month or use “Add salary”</span></div>
@@ -3306,7 +3346,12 @@ const CSS = `
 .hz-stageicon.clickable{cursor:pointer;}
 .hz-stageicon.clickable:hover{border-color:var(--ember);background:color-mix(in srgb,var(--ember) 12%,transparent);}
 
-/* Payment proof thumbnail on staff order cards */
+/* First-load sync gate (prevents seed-data flash on refresh) */
+.hz-syncing{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:70px 20px;text-align:center;}
+.hz-syncing-spin{width:34px;height:34px;border-radius:50%;border:3px solid var(--border);border-top-color:var(--ember);animation:hzspin .7s linear infinite;margin-bottom:6px;}
+.hz-syncing b{font-size:14px;color:var(--text);}
+.hz-syncing span{font-size:12px;color:var(--muted);}
+@keyframes hzspin{to{transform:rotate(360deg);}}
 .hz-proofthumb{display:flex;align-items:center;gap:9px;width:100%;margin:8px 0 2px;padding:7px;border:1px solid var(--border);border-radius:10px;background:var(--surface2);cursor:pointer;text-align:left;}
 .hz-proofthumb:hover{border-color:var(--ember);}
 .hz-proofthumb img{width:40px;height:40px;object-fit:cover;border-radius:7px;flex-shrink:0;}
@@ -3383,12 +3428,45 @@ const CSS = `
 .hz-stockform input{width:100%;min-width:0;padding:10px 11px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;font-family:inherit;outline:none;transition:.15s;}
 .hz-stockform input:focus{border-color:var(--ember);box-shadow:0 0 0 3px color-mix(in srgb,var(--ember) 16%,transparent);}
 .hz-stockform input::placeholder{color:var(--muted);opacity:.65;}
+/* Rebuilt inventory row — standard format with audit info, no empty bars. */
+.hz-invrow2{display:flex;align-items:center;gap:12px;background:var(--bg2);border:1px solid var(--border);border-radius:13px;padding:12px 14px;}
+/* Payroll monthly outgoing summary (salary + stock integration) */
+.hz-outsum{margin-bottom:14px;}
+.hz-outgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;}
+.hz-outcell{display:flex;align-items:center;gap:9px;padding:11px;border-radius:11px;background:var(--surface2);border:1px solid var(--border);}
+.hz-outcell.total{background:color-mix(in srgb,var(--jade) 8%,var(--surface2));border-color:color-mix(in srgb,var(--jade) 30%,var(--border));}
+.hz-out-ic{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;background:var(--surface);flex-shrink:0;}
+.hz-outcell b{display:block;font-size:15px;font-weight:800;color:var(--text);font-family:var(--fm);}
+.hz-outcell span{font-size:10.5px;color:var(--muted);font-weight:600;}
+.hz-outnote{display:flex;align-items:center;gap:6px;margin-top:11px;padding:9px 11px;border-radius:9px;background:color-mix(in srgb,var(--rose) 7%,transparent);font-size:12px;color:var(--muted);}
+.hz-outnote b{color:var(--text);}
+.hz-invrow2.low{border-color:color-mix(in srgb,var(--rose) 45%,var(--border));}
+.hz-inv-ic{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;background:var(--surface2);color:var(--muted);flex-shrink:0;}
+.hz-invrow2.low .hz-inv-ic{color:var(--rose);background:color-mix(in srgb,var(--rose) 12%,transparent);}
+.hz-inv-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;}
+.hz-inv-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.hz-inv-top b{font-size:14px;color:var(--text);}
+.hz-inv-meta{display:flex;flex-direction:column;gap:2px;}
+.hz-inv-meta span{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);}
+.hz-inv-meta svg{opacity:.7;flex-shrink:0;}
+.hz-inv-right{display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex-shrink:0;}
+.hz-inv-stock{display:flex;align-items:baseline;gap:4px;}
+.hz-inv-stock b{font-size:17px;font-weight:800;color:var(--text);font-family:var(--fm);}
+.hz-inv-stock b.low{color:var(--rose);}
+.hz-inv-stock span{font-size:11px;color:var(--muted);font-weight:600;}
+.hz-inv-cost{font-size:11px;color:var(--jade);font-weight:700;white-space:nowrap;}
+@media (max-width:640px){
+  .hz-invrow2{flex-wrap:wrap;}
+  .hz-inv-right{align-items:flex-start;}
+}
 .hz-costin{display:flex;align-items:center;gap:7px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding-left:11px;min-width:0;}
 .hz-costin:focus-within{border-color:var(--ember);box-shadow:0 0 0 3px color-mix(in srgb,var(--ember) 16%,transparent);}
 .hz-costin em{font-style:normal;font-size:12px;font-weight:700;color:var(--muted);font-family:var(--fm);flex-shrink:0;}
 /* the Rs input sits INSIDE .hz-costin, so it must have no box of its own —
-   otherwise you see a border-in-a-border ("double box"). */
-.hz-stockform .hz-costin input{border:none!important;background:transparent!important;padding:10px 0!important;box-shadow:none!important;border-radius:0!important;}
+   otherwise you see a border-in-a-border ("double box"), including the focus
+   ring. The wrapper .hz-costin handles the border + focus glow for both. */
+.hz-stockform .hz-costin input{border:none!important;background:transparent!important;padding:10px 0!important;box-shadow:none!important;border-radius:0!important;outline:none!important;}
+.hz-stockform .hz-costin input:focus{border:none!important;box-shadow:none!important;outline:none!important;}
 .hz-sf-btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:39px;padding:0 16px;border-radius:10px;font-size:13px;font-weight:700;color:#0c0a08;white-space:nowrap;background:linear-gradient(135deg,var(--jade),var(--saffron));transition:.15s;}
 .hz-sf-btn:hover:not(:disabled){filter:brightness(1.07);}
 .hz-sf-btn:disabled{opacity:.45;cursor:not-allowed;}
