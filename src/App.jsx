@@ -812,7 +812,7 @@ export default function App() {
     const m = {}; a.forEach((o, i) => (m[o.id] = i + 1)); return m;
   }, [orders]);
 
-  const ctx = { orders, queue, users, inventory, requests, menu, branchWaiters, lightestWaiter, branchRiders, lightestRider, activeCount,
+  const ctx = { orders, queue, users, inventory, requests, menu, branchWaiters, lightestWaiter, branchRiders, lightestRider, activeCount, myName: session ? session.name : "Staff",
     setStatus, markServed, markPreparing, markReady, riderStep, notifs, cancel, togglePriority, setPaid, setUnpaid, addOrder, addItemsToOrder, addUser, toggleUser, deleteUser,
     setSalary, addAdvance, paySalary, unpaySalary, addStock, restock, buyStock, purchases, addRequest, fulfillRequest, rejectRequest,
     addMenuItem, toggleMenuItem, toggleMenuBranch, deleteMenuItem, updateMenuItem, updateUser, updateInventory, deleteInventory, branchOpen, toggleBranch,
@@ -2012,7 +2012,6 @@ function ManagerOps({ ctx, branch, onPrint }) {
   const all = ctx.orders.filter(inB).filter((o) => (dayFilter === "today" && ACTIVE(o.status)) || dayTest(o.createdAt)).sort((a, b) => (dayStart(b.createdAt) - dayStart(a.createdAt)) || (b.priority - a.priority) || (a.createdAt - b.createdAt));
   const active = all.filter((o) => ACTIVE(o.status));
   const revenue = all.reduce((a, b) => a + grand(b), 0);
-  const lowStock = ctx.inventory.filter((i) => (branch === "all" || i.branch === branch) && i.stock <= i.low).length;
   const branches = branch === "all" ? BRANCHES.map((b) => b.id) : [branch];
   const team = branches.flatMap((b) => [
     ...ctx.branchWaiters(b).map((w) => ({ w, b, role: "waiter" })),
@@ -2030,7 +2029,7 @@ function ManagerOps({ ctx, branch, onPrint }) {
         <Kpi icon={ShoppingBag} label="Orders" val={all.length} c="#FF6B2C" />
         <Kpi icon={Clock} label="Active Now" val={active.length} c="#FFB22C" />
         <Kpi icon={Receipt} label="Revenue" val={rs(revenue)} c="#29D3A6" />
-        <Kpi icon={AlertTriangle} label="Low Stock" val={lowStock} c="#FF5470" />
+        <Kpi icon={CheckCircle2} label="Completed" val={all.filter((o) => o.status === "completed").length} c="#5A9CFF" />
       </div>
       <div className="hz-branchstatus">
         <span className="hz-bs-lbl"><Building2 size={14} />Branch status<InfoTip label="About branch status">Closing a branch immediately stops customers from ordering there — it shows as “Closed” on the home page and cannot be selected at checkout.</InfoTip></span>
@@ -2097,28 +2096,43 @@ function ManagerOps({ ctx, branch, onPrint }) {
 function Inventory({ ctx, branch, isAdmin }) {
   const inB = (x) => branch === "all" || x.branch === branch;
   const inv = ctx.inventory.filter(inB);
-  const low = inv.filter((i) => i.stock <= i.low);
   const purchases = (ctx.purchases || []).filter((p) => branch === "all" || p.branch === branch);
   const monthSpend = purchases.filter((p) => isThisMonth(p.date)).reduce((a, b) => a + b.cost, 0);
   const todaySpend = purchases.filter((p) => isToday(p.date)).reduce((a, b) => a + b.cost, 0);
   const lastCost = (name, b) => { const hit = purchases.filter((p) => p.item.toLowerCase() === name.toLowerCase() && p.branch === b).sort((x, y) => y.date - x.date)[0]; return hit ? hit.cost / Math.max(1, hit.qty) : 0; };
+  // Business figures the owner cares about: what was spent on stock ("maal"),
+  // what the shop sold, and the resulting gross profit — today and this month.
+  const orders = ctx.orders.filter((o) => (branch === "all" || o.branch === branch) && o.status !== "cancelled");
+  const monthSales = orders.filter((o) => isThisMonth(o.createdAt)).reduce((a, b) => a + grand(b), 0);
+  const todaySales = orders.filter((o) => isToday(o.createdAt)).reduce((a, b) => a + grand(b), 0);
+  const monthProfit = monthSales - monthSpend;
+  const todayProfit = todaySales - todaySpend;
+  const marginPct = monthSales > 0 ? Math.round((monthProfit / monthSales) * 100) : 0;
+  const stockValue = inv.reduce((a, it) => a + it.stock * lastCost(it.name, it.branch), 0);
   const [editId, setEditId] = useState(null);   // which inventory row is being edited
   const [nm, setNm] = useState(""); const [unit, setUnit] = useState(""); const [qty, setQty] = useState(""); const [cost, setCost] = useState("");
   const [addBranch, setAddBranch] = useState(branch === "all" ? "g91" : branch);
   const targetBranch = branch === "all" ? addBranch : branch;
-  const addStock = () => { if (!nm.trim() || !(+qty > 0)) return; ctx.buyStock(targetBranch, nm.trim(), unit.trim() || "units", +qty, +cost || 0, "Manager"); setNm(""); setUnit(""); setQty(""); setCost(""); };
+  const addStock = () => { if (!nm.trim() || !(+qty > 0)) return; ctx.buyStock(targetBranch, nm.trim(), unit.trim() || "units", +qty, +cost || 0, ctx.myName || "Manager"); setNm(""); setUnit(""); setQty(""); setCost(""); };
   const recent = purchases.slice().sort((a, b) => b.date - a.date).slice(0, 8);
   return (
     <>
+      {/* Business snapshot — the owner's "face of the business": money spent on
+          stock vs money earned vs profit, for today and this month. */}
+      <div className="hz-bizrow">
+        <div className="hz-bizcard in"><span className="hz-biz-ic"><Boxes size={18} /></span><div><b>{rs(monthSpend)}</b><span>Stock bought · month</span><em>{rs(todaySpend)} today</em></div></div>
+        <div className="hz-bizcard sale"><span className="hz-biz-ic"><TrendingUp size={18} /></span><div><b>{rs(monthSales)}</b><span>Sales · month</span><em>{rs(todaySales)} today</em></div></div>
+        <div className={"hz-bizcard prof" + (monthProfit < 0 ? " neg" : "")}><span className="hz-biz-ic"><Wallet size={18} /></span><div><b>{rs(monthProfit)}</b><span>Gross profit · month</span><em>{marginPct}% margin</em></div></div>
+      </div>
       <div className="hz-mkpis">
         <Kpi icon={Package} label="Items Tracked" val={inv.length} c="#5A9CFF" />
-        <Kpi icon={AlertTriangle} label="Low Stock" val={low.length} c="#FF5470" />
-        <Kpi icon={Boxes} label="Stock In · Today" val={rs(todaySpend)} c="#FFB22C" />
-        <Kpi icon={TrendingUp} label="Stock In · Month" val={rs(monthSpend)} c="#29D3A6" />
+        <Kpi icon={Boxes} label="Stock Value Now" val={rs(Math.round(stockValue))} c="#FFB22C" />
+        <Kpi icon={ShoppingBag} label="Bought Today" val={rs(todaySpend)} c="#FF8A5C" />
+        <Kpi icon={Wallet} label="Profit Today" val={rs(todayProfit)} c={todayProfit < 0 ? "#FF5470" : "#29D3A6"} />
       </div>
       <div className="hz-invlayout">
         <div className="hz-card">
-          <div className="hz-card-h"><h3>Inventory</h3><span className="hz-card-sub">{low.length} low · admin &amp; manager</span></div>
+          <div className="hz-card-h"><h3>Inventory</h3><span className="hz-card-sub">{inv.length} items · admin &amp; manager</span></div>
           <div className="hz-addstock">
             <div className="hz-addstock-h"><PackagePlus size={13} />Add / restock at <b style={{ color: "var(--ember)" }}>&nbsp;{branchName(targetBranch)}</b><InfoTip label="About adding stock">Type any item name — it is created automatically if it doesn't exist yet.<br /><br />Entering the cost you paid records the purchase, which feeds the “Stock In” totals and the dashboard's money in vs out.</InfoTip></div>
             {branch === "all" && <div className="hz-segt sm" style={{ margin: "0 0 9px" }}>{BRANCHES.map((b) => <button key={b.id} className={addBranch === b.id ? "on" : ""} onClick={() => setAddBranch(b.id)}>{b.name}</button>)}</div>}
@@ -2134,21 +2148,21 @@ function Inventory({ ctx, branch, isAdmin }) {
               <button className="hz-sf-btn" disabled={!nm.trim() || !(+qty > 0)} onClick={addStock}><Plus size={15} />Add stock</button>
             </div>
           </div>
-          <div className="hz-invgrid">{inv.map((it) => { const lowFlag = it.stock <= it.low; const c = lastCost(it.name, it.branch); const lastP = purchases.filter((p) => p.item.toLowerCase() === it.name.toLowerCase() && p.branch === it.branch).sort((x, y) => y.date - x.date)[0];
+          <div className="hz-invgrid">{inv.map((it) => { const c = lastCost(it.name, it.branch); const lastP = purchases.filter((p) => p.item.toLowerCase() === it.name.toLowerCase() && p.branch === it.branch).sort((x, y) => y.date - x.date)[0];
             if (editId === it.id) return <InvEditRow key={it.id} it={it} onCancel={() => setEditId(null)} onSave={(patch) => { ctx.updateInventory(it.id, patch); setEditId(null); }} />;
-            return (<div className={"hz-invrow2" + (lowFlag ? " low" : "")} key={it.id}>
+            return (<div className="hz-invrow2" key={it.id}>
               <div className="hz-inv-ic"><Package size={17} /></div>
               <div className="hz-inv-main">
-                <div className="hz-inv-top"><b>{it.name}</b>{branch === "all" && <BranchTag b={it.branch} />}{lowFlag && <span className="hz-lowtag">LOW</span>}</div>
+                <div className="hz-inv-top"><b>{it.name}</b>{branch === "all" && <BranchTag b={it.branch} />}</div>
                 <div className="hz-inv-meta">
-                  <span><Boxes size={11} />In stock: {it.stock} {it.unit} · low at {it.low} {it.unit}{c > 0 ? ` · worth ~${rs(Math.round(it.stock * c))}` : ""}</span>
+                  <span><Boxes size={11} />In stock: {it.stock} {it.unit}{c > 0 ? ` · worth ~${rs(Math.round(it.stock * c))}` : ""}</span>
                   {lastP && <span><Receipt size={11} />Last buy: {lastP.qty} {it.unit} for {rs(lastP.cost)} · {dateShort(lastP.date)}{lastP.by ? ` · ${lastP.by}` : ""}</span>}
                   {it.addedBy && <span><Plus size={11} />Added by {it.addedBy}{it.addedAt ? ` · ${dateShort(it.addedAt)}` : ""}</span>}
                   {it.editedBy && it.editedAt && <span><Pencil size={11} />Edited by {it.editedBy} · {dateShort(it.editedAt)}</span>}
                 </div>
               </div>
               <div className="hz-inv-right">
-                <div className="hz-inv-stock"><b className={lowFlag ? "low" : ""}>{it.stock}</b><span>{it.unit}</span></div>
+                <div className="hz-inv-stock"><b>{it.stock}</b><span>{it.unit}</span></div>
                 {c > 0 && <div className="hz-inv-cost">~{rs(Math.round(c))}/{it.unit}</div>}
               </div>
               <div className="hz-qadd2"><button onClick={() => ctx.addStock(it.id, 5)}>+5</button><button onClick={() => ctx.addStock(it.id, 10)}>+10</button></div>
@@ -2175,8 +2189,7 @@ function InvEditRow({ it, onCancel, onSave }) {
   const [n, setN] = useState(it.name);
   const [u, setU] = useState(it.unit);
   const [st, setSt] = useState(String(it.stock));
-  const [low, setLow] = useState(String(it.low));
-  const ok = n.trim() && u.trim() && st !== "" && low !== "";
+  const ok = n.trim() && u.trim() && st !== "";
   return (
     <div className="hz-editrow">
       <div className="hz-editrow-h"><Pencil size={13} />Editing stock item</div>
@@ -2186,10 +2199,9 @@ function InvEditRow({ it, onCancel, onSave }) {
           <label>Unit<input value={u} onChange={(e) => setU(e.target.value)} placeholder="kg / pcs / L" /></label>
           <label>Current stock<input value={st} onChange={(e) => setSt(e.target.value.replace(/[^\d.]/g, ""))} /></label>
         </div>
-        <label>Low-stock alert below<input value={low} onChange={(e) => setLow(e.target.value.replace(/[^\d.]/g, ""))} /></label>
         <div className="hz-corow2">
           <button className="hz-ghost" onClick={onCancel}><X size={14} />Cancel</button>
-          <button className="hz-fulfill" disabled={!ok} onClick={() => onSave({ name: n.trim(), unit: u.trim(), stock: +st, low: +low })}><Check size={14} />Save changes</button>
+          <button className="hz-fulfill" disabled={!ok} onClick={() => onSave({ name: n.trim(), unit: u.trim(), stock: +st })}><Check size={14} />Save changes</button>
         </div>
       </div>
     </div>
@@ -3504,6 +3516,24 @@ const CSS = `
 .hz-stockform input::placeholder{color:var(--muted);opacity:.65;}
 /* Rebuilt inventory row — standard format with audit info, no empty bars. */
 .hz-invrow2{display:flex;align-items:center;gap:12px;background:var(--bg2);border:1px solid var(--border);border-radius:13px;padding:12px 14px;}
+/* Inventory business summary (stock bought vs sales vs profit) */
+.hz-bizrow{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px;}
+.hz-bizcard{display:flex;align-items:center;gap:11px;padding:15px;border-radius:15px;border:1px solid var(--border);background:var(--bg2);}
+.hz-bizcard.in{background:linear-gradient(135deg,color-mix(in srgb,#FF8A5C 14%,var(--bg2)),var(--bg2));border-color:color-mix(in srgb,#FF8A5C 28%,var(--border));}
+.hz-bizcard.sale{background:linear-gradient(135deg,color-mix(in srgb,#29D3A6 14%,var(--bg2)),var(--bg2));border-color:color-mix(in srgb,#29D3A6 28%,var(--border));}
+.hz-bizcard.prof{background:linear-gradient(135deg,color-mix(in srgb,#5A9CFF 15%,var(--bg2)),var(--bg2));border-color:color-mix(in srgb,#5A9CFF 30%,var(--border));}
+.hz-bizcard.prof.neg{background:linear-gradient(135deg,color-mix(in srgb,var(--rose) 14%,var(--bg2)),var(--bg2));border-color:color-mix(in srgb,var(--rose) 30%,var(--border));}
+.hz-biz-ic{width:40px;height:40px;border-radius:11px;display:grid;place-items:center;background:var(--surface);flex-shrink:0;}
+.hz-bizcard.in .hz-biz-ic{color:#FF8A5C;}
+.hz-bizcard.sale .hz-biz-ic{color:#29D3A6;}
+.hz-bizcard.prof .hz-biz-ic{color:#5A9CFF;}
+.hz-bizcard.prof.neg .hz-biz-ic{color:var(--rose);}
+.hz-bizcard b{display:block;font-size:19px;font-weight:800;color:var(--text);font-family:var(--fm);line-height:1.1;}
+.hz-bizcard span{font-size:11px;color:var(--muted);font-weight:600;display:block;}
+.hz-bizcard em{font-size:10.5px;color:var(--muted);font-style:normal;opacity:.75;display:block;margin-top:2px;}
+.hz-bizcard.prof em{color:#5A9CFF;opacity:.9;font-weight:700;}
+.hz-bizcard.prof.neg em{color:var(--rose);}
+@media (max-width:640px){.hz-bizrow{grid-template-columns:1fr;}}
 /* Payroll monthly outgoing summary (salary + stock integration) */
 .hz-outsum{margin-bottom:14px;}
 .hz-outgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;}
