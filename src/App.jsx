@@ -4,7 +4,7 @@ import {
   Star, Plus, Minus, Check, ArrowRight, Play, Pause, LogOut, ClipboardList,
   User, Hash, Receipt, Trash2, ChevronRight, ChevronLeft, ShieldCheck, Users,
   CircleAlert, MapPin, CheckCircle2, Soup, UserPlus, KeyRound, Wallet,
-  Lock, Package, AlertTriangle, PackagePlus, X, Search,
+  Lock, Package, AlertTriangle, PackagePlus, X, Search, Printer,
   ImagePlus, UtensilsCrossed, Truck, Bike, Home, Phone, CreditCard, Banknote,
   Building2, Navigation, ShoppingCart, BarChart3, TrendingUp, Boxes, Calendar, Pencil, Info, Wifi, WifiOff,
 } from "lucide-react";
@@ -769,7 +769,7 @@ export default function App() {
   const restock = (branch, name, unit, qty, low) => setInventory((p) => {
     const i = p.findIndex((x) => x.branch === branch && x.name.toLowerCase() === name.trim().toLowerCase());
     if (i >= 0) { const c = [...p]; c[i] = { ...c[i], stock: +(c[i].stock + qty).toFixed(1), ...stamp() }; return c; }
-    return [...p, { id: branch + "-x" + now() + Math.random().toString(36).slice(2, 6), branch, name: name.trim(), unit: unit || "units", stock: qty, low: low || Math.max(1, Math.round(qty * 0.4)), addedBy: session ? session.name : "System", addedAt: now(), ...stamp() }];
+    return [...p, { id: branch + "-x" + now() + Math.random().toString(36).slice(2, 6), branch, name: name.trim(), unit: unit || "units", stock: qty, addedBy: session ? session.name : "System", addedAt: now() }];
   });
   // Adds stock AND records what was paid, so the dashboard can show cost.
   const buyStock = (branch, name, unit, qty, cost, by) => {
@@ -1757,7 +1757,7 @@ function Manager({ ctx, isAdmin, myBranch, onPreview }) {
   const [printOrder, setPrintOrder] = useState(null);
   const branch = isAdmin ? branchSel : myBranch;
   const tabs = isAdmin
-    ? [["dash", BarChart3, "Dashboard"], ["ops", Store, "Operations"], ["inv", Package, "Inventory"], ["menu", UtensilsCrossed, "Menu"], ["staff", Users, "Staff"], ["pay", Wallet, "Payroll"], ["qr", QrCode, "QR Codes"]]
+    ? [["dash", BarChart3, "Dashboard"], ["ops", Store, "Operations"], ["inv", Package, "Inventory"], ["reports", Receipt, "Reports"], ["menu", UtensilsCrossed, "Menu"], ["staff", Users, "Staff"], ["pay", Wallet, "Payroll"], ["qr", QrCode, "QR Codes"]]
     : [["dash", BarChart3, "Dashboard"], ["ops", Store, "Operations"], ["inv", Package, "Inventory"], ["staff", Users, "Staff"], ["pay", Wallet, "Payroll"], ["qr", QrCode, "QR Codes"]];
   const staffInScope = ctx.users.filter((u) => branch === "all" ? true : u.branch === branch);
   return (
@@ -1777,6 +1777,7 @@ function Manager({ ctx, isAdmin, myBranch, onPreview }) {
       {tab === "dash" && <Dashboard ctx={ctx} branch={branch} />}
       {tab === "ops" && <ManagerOps ctx={ctx} branch={branch} onPrint={setPrintOrder} />}
       {tab === "inv" && <Inventory ctx={ctx} branch={branch} isAdmin={isAdmin} />}
+      {tab === "reports" && isAdmin && <Reports ctx={ctx} branch={branch} />}
       {tab === "menu" && isAdmin && <MenuManager ctx={ctx} />}
       {tab === "staff" && <StaffUsers ctx={ctx} isAdmin={isAdmin} myBranch={myBranch} branch={branch} />}
       {tab === "pay" && <Payroll ctx={ctx} isAdmin={isAdmin} myBranch={myBranch} branch={branch} />}
@@ -1807,6 +1808,13 @@ function Dashboard({ ctx, branch }) {
   const recentBuys = purchases.slice().sort((a, b) => b.date - a.date).slice(0, 6);
   const taxMonth = orders.filter((o) => good(o) && isThisMonth(o.createdAt)).reduce((a, b) => a + (b.tax || 0), 0);
   const taxToday = orders.filter((o) => good(o) && isToday(o.createdAt)).reduce((a, b) => a + (b.tax || 0), 0);
+  // Salary actually paid out this month (from each staff member's payment log)
+  // plus advances given this month — so the dashboard can show a TRUE profit
+  // after wages, not just sales minus stock.
+  const allStaff = ctx.users.filter((u) => u.role !== "admin" && (branch === "all" || u.branch === branch));
+  const salaryPaidMonth = allStaff.reduce((a, u) => a + (u.payments || []).filter((p) => p.month === monthKey(now())).reduce((x, p) => x + p.amount, 0), 0);
+  const advMonth = allStaff.reduce((a, u) => a + (u.advances || []).filter((ad) => isThisMonth(ad.date)).reduce((x, ad) => x + ad.amount, 0), 0);
+  const finalProfit = monthSales - monthSpend - salaryPaidMonth - advMonth;
   const branchList = branch === "all" ? BRANCHES.map((b) => b.id) : [branch];
 
   return (
@@ -1847,13 +1855,14 @@ function Dashboard({ ctx, branch }) {
 
         <div className="hz-card">
           <div className="hz-card-h"><h3>Money in vs out<InfoTip label="How this is calculated">
-            <b>Net</b> is sales minus stock cost only — salaries, rent and utilities are not included.<br /><br />
+            <b>Final profit</b> is sales minus stock cost minus salaries and advances paid this month. Rent and utilities are not included.<br /><br />
             Collected sales tax ({branchName(TAX_BRANCH)}) is money you must pay to the government, not profit.
           </InfoTip></h3><span className="hz-card-sub">this month</span></div>
           <div className="hz-moneyrow"><span className="hz-money-ic" style={{ color: "#29D3A6" }}><TrendingUp size={16} /></span><div className="hz-load-main"><b>Sales in</b></div><span className="hz-money-v" style={{ color: "#29D3A6" }}>{rs(monthSales)}</span></div>
           <div className="hz-moneyrow"><span className="hz-money-ic" style={{ color: "#FF5470" }}><Boxes size={16} /></span><div className="hz-load-main"><b>Stock purchased (maal)</b></div><span className="hz-money-v" style={{ color: "#FF5470" }}>− {rs(monthSpend)}</span></div>
+          <div className="hz-moneyrow"><span className="hz-money-ic" style={{ color: "#FFB22C" }}><Wallet size={16} /></span><div className="hz-load-main"><b>Salaries paid</b>{advMonth > 0 && <span className="hz-taxsub">incl. {rs(advMonth)} advances</span>}</div><span className="hz-money-v" style={{ color: "#FFB22C" }}>− {rs(salaryPaidMonth + advMonth)}</span></div>
           <div className="hz-moneyrow"><span className="hz-money-ic" style={{ color: "#5A9CFF" }}><Receipt size={16} /></span><div className="hz-load-main"><b>Sales tax collected</b><span className="hz-taxsub">today {rs(taxToday)}</span></div><span className="hz-money-v" style={{ color: "#5A9CFF" }}>{rs(taxMonth)}</span></div>
-          <div className="hz-moneyrow total"><span className="hz-money-ic"><Wallet size={16} /></span><div className="hz-load-main"><b>Net</b></div><span className="hz-money-v" style={{ color: monthSales - monthSpend >= 0 ? "#29D3A6" : "#FF5470" }}>{rs(monthSales - monthSpend)}</span></div>
+          <div className="hz-moneyrow total"><span className="hz-money-ic"><Wallet size={16} /></span><div className="hz-load-main"><b>Final profit</b><span className="hz-taxsub">after stock &amp; wages</span></div><span className="hz-money-v" style={{ color: finalProfit >= 0 ? "#29D3A6" : "#FF5470" }}>{rs(finalProfit)}</span></div>
 
           <div className="hz-buyhist">
             <div className="hz-buyhist-h">Recent stock purchases</div>
@@ -2006,10 +2015,16 @@ function ManagerOps({ ctx, branch, onPrint }) {
     { id: "all", label: "All", test: () => true },
   ];
   const dayTest = DAY_FILTERS.find((d) => d.id === dayFilter).test;
+  const [oq, setOq] = useState("");   // search by order number or customer name
+  const oqx = oq.trim().toLowerCase();
   /* Each tab shows exactly its own period. Active (in-progress) orders are only
      force-included in the "Today" tab — so an order still cooking is never lost —
-     but they don't leak into Yesterday/Last-7 views, which stay clean and dated. */
-  const all = ctx.orders.filter(inB).filter((o) => (dayFilter === "today" && ACTIVE(o.status)) || dayTest(o.createdAt)).sort((a, b) => (dayStart(b.createdAt) - dayStart(a.createdAt)) || (b.priority - a.priority) || (a.createdAt - b.createdAt));
+     but they don't leak into Yesterday/Last-7 views, which stay clean and dated.
+     When a search term is typed, it searches across ALL orders (any date). */
+  const all = ctx.orders.filter(inB).filter((o) => {
+    if (oqx) return String(o.q).includes(oqx) || (o.customer || "").toLowerCase().includes(oqx) || (o.phone || "").includes(oqx);
+    return (dayFilter === "today" && ACTIVE(o.status)) || dayTest(o.createdAt);
+  }).sort((a, b) => (dayStart(b.createdAt) - dayStart(a.createdAt)) || (b.priority - a.priority) || (a.createdAt - b.createdAt));
   const active = all.filter((o) => ACTIVE(o.status));
   const revenue = all.reduce((a, b) => a + grand(b), 0);
   const branches = branch === "all" ? BRANCHES.map((b) => b.id) : [branch];
@@ -2055,7 +2070,9 @@ function ManagerOps({ ctx, branch, onPrint }) {
         </div>
         <div className="hz-card hz-orderscard">
           <div className="hz-card-h"><h3>All Orders</h3><span className="hz-card-sub">print → kitchen ticket + bill</span></div>
-          <div className="hz-daychips">{DAY_FILTERS.map((d) => <button key={d.id} className={"hz-daychip" + (dayFilter === d.id ? " on" : "")} onClick={() => setDayFilter(d.id)}>{d.label}</button>)}</div>
+          <div className="hz-osearch"><Search size={15} /><input value={oq} onChange={(e) => setOq(e.target.value)} placeholder="Search order # or customer name…" />{oq && <button onClick={() => setOq("")}><X size={14} /></button>}</div>
+          {!oqx && <div className="hz-daychips">{DAY_FILTERS.map((d) => <button key={d.id} className={"hz-daychip" + (dayFilter === d.id ? " on" : "")} onClick={() => setDayFilter(d.id)}>{d.label}</button>)}</div>}
+          {oqx && <div className="hz-searchnote">Showing all matches for “{oq}” across every date</div>}
           {groups.length === 0 && <Empty text="No orders in this range." />}
           {groups.map((g) => (
             <div key={g.label}>
@@ -2093,6 +2110,102 @@ function ManagerOps({ ctx, branch, onPrint }) {
 }
 /* Stock management for admins and managers. Adding stock records both the
    quantity and what was paid, which feeds the cost figures on the dashboard. */
+/* ----------------------------- Reports ---------------------------- */
+/* Admin-only. A month-by-month breakdown for any year the business has data
+   in: sales, stock bought, salaries paid, and the resulting profit. The owner
+   picks a year and sees all 12 months, plus a year total, and can print it. */
+function Reports({ ctx, branch }) {
+  const inB = (x) => branch === "all" || x.branch === branch;
+  const orders = ctx.orders.filter((o) => inB(o) && o.status !== "cancelled");
+  const purchases = (ctx.purchases || []).filter(inB);
+  const users = ctx.users.filter((u) => u.role !== "admin" && inB(u));
+
+  // Which years have any activity? Always include the current year.
+  const years = useMemo(() => {
+    const s = new Set([new Date().getFullYear()]);
+    orders.forEach((o) => s.add(new Date(o.createdAt).getFullYear()));
+    purchases.forEach((p) => s.add(new Date(p.date).getFullYear()));
+    return [...s].sort((a, b) => b - a);
+  }, [orders, purchases]);
+  const [year, setYear] = useState(years[0]);
+
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const rows = MONTHS.map((mn, m) => {
+    const inMonth = (ts) => { const d = new Date(ts); return d.getFullYear() === year && d.getMonth() === m; };
+    const sales = orders.filter((o) => inMonth(o.createdAt)).reduce((a, b) => a + grand(b), 0);
+    const ordersN = orders.filter((o) => inMonth(o.createdAt)).length;
+    const stock = purchases.filter((p) => inMonth(p.date)).reduce((a, b) => a + b.cost, 0);
+    const salary = users.reduce((a, u) => a + (u.payments || []).filter((p) => { const [yy, mm] = p.month.split("-").map(Number); return yy === year && mm === m + 1; }).reduce((x, p) => x + p.amount, 0), 0);
+    const adv = users.reduce((a, u) => a + (u.advances || []).filter((ad) => inMonth(ad.date)).reduce((x, ad) => x + ad.amount, 0), 0);
+    const profit = sales - stock - salary - adv;
+    return { mn, m, sales, ordersN, stock, salary: salary + adv, profit, has: sales || stock || salary || adv };
+  });
+  const tot = rows.reduce((a, r) => ({ sales: a.sales + r.sales, ordersN: a.ordersN + r.ordersN, stock: a.stock + r.stock, salary: a.salary + r.salary, profit: a.profit + r.profit }), { sales: 0, ordersN: 0, stock: 0, salary: 0, profit: 0 });
+
+  const printReport = () => {
+    const w = window.open("", "_blank", "width=800,height=900");
+    if (!w) return;
+    const money = (n) => "Rs " + Math.round(n).toLocaleString("en-PK");
+    const body = rows.filter((r) => r.has).map((r) => `<tr><td>${r.mn} ${year}</td><td style="text-align:right">${r.ordersN}</td><td style="text-align:right">${money(r.sales)}</td><td style="text-align:right">${money(r.stock)}</td><td style="text-align:right">${money(r.salary)}</td><td style="text-align:right;font-weight:700;color:${r.profit < 0 ? "#c00" : "#080"}">${money(r.profit)}</td></tr>`).join("");
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>De-Hunza Sizzle — ${year} Report</title>
+      <style>body{font-family:Arial,sans-serif;padding:30px;color:#111}h1{font-size:20px;margin:0}h2{font-size:13px;color:#666;font-weight:400;margin:2px 0 20px}
+      table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px 10px;border-bottom:1px solid #ddd}th{text-align:left;background:#f4f4f4;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+      tr.tot td{border-top:2px solid #111;font-weight:800;font-size:14px}tfoot{}</style></head><body>
+      <h1>The Hunza Sizzle — Annual Report ${year}</h1><h2>${branch === "all" ? "All branches" : branchName(branch)} · Generated ${new Date().toLocaleDateString("en-GB")}</h2>
+      <table><thead><tr><th>Month</th><th style="text-align:right">Orders</th><th style="text-align:right">Sales</th><th style="text-align:right">Stock bought</th><th style="text-align:right">Salaries</th><th style="text-align:right">Profit</th></tr></thead>
+      <tbody>${body || '<tr><td colspan="6" style="text-align:center;color:#999;padding:30px">No data for this year</td></tr>'}</tbody>
+      <tfoot><tr class="tot"><td>${year} Total</td><td style="text-align:right">${tot.ordersN}</td><td style="text-align:right">${money(tot.sales)}</td><td style="text-align:right">${money(tot.stock)}</td><td style="text-align:right">${money(tot.salary)}</td><td style="text-align:right;color:${tot.profit < 0 ? "#c00" : "#080"}">${money(tot.profit)}</td></tr></tfoot>
+      </table><p style="margin-top:30px;font-size:10px;color:#999">Profit = Sales − Stock − Salaries. Rent, utilities and sales tax not included. Software by MM Tech &amp; AI.</p>
+      </body></html>`);
+    w.document.close(); setTimeout(() => { w.focus(); w.print(); }, 250);
+  };
+
+  return (
+    <>
+      <div className="hz-card-h" style={{ marginBottom: 12 }}>
+        <div><h3 style={{ margin: 0 }}>Annual Reports</h3><span className="hz-card-sub">month-by-month · sales, stock &amp; profit</span></div>
+        <button className="hz-printbtn" onClick={printReport}><Printer size={14} />Print / Save PDF</button>
+      </div>
+      <div className="hz-segt sm" style={{ maxWidth: 340, flexWrap: "wrap" }}>
+        {years.map((y) => <button key={y} className={year === y ? "on" : ""} onClick={() => setYear(y)}>{y}</button>)}
+      </div>
+      <div className="hz-mkpis" style={{ marginTop: 4 }}>
+        <Kpi icon={TrendingUp} label={`${year} Sales`} val={rs(tot.sales)} c="#29D3A6" />
+        <Kpi icon={Boxes} label={`${year} Stock`} val={rs(tot.stock)} c="#FF8A5C" />
+        <Kpi icon={Wallet} label={`${year} Salaries`} val={rs(tot.salary)} c="#FFB22C" />
+        <Kpi icon={Receipt} label={`${year} Profit`} val={rs(tot.profit)} c={tot.profit < 0 ? "#FF5470" : "#5A9CFF"} />
+      </div>
+      <div className="hz-card" style={{ marginTop: 14 }}>
+        <div className="hz-reptable">
+          <div className="hz-rep-head"><span>Month</span><span>Orders</span><span>Sales</span><span>Stock</span><span>Salaries</span><span>Profit</span></div>
+          {rows.filter((r) => r.has).length === 0 && <Empty text={`No data recorded for ${year} yet.`} />}
+          {rows.filter((r) => r.has).map((r) => (
+            <div className="hz-rep-row" key={r.m}>
+              <span className="hz-rep-mn">{r.mn}</span>
+              <span>{r.ordersN}</span>
+              <span className="hz-rep-sale">{rs(r.sales)}</span>
+              <span className="hz-rep-stock">− {rs(r.stock)}</span>
+              <span className="hz-rep-sal">− {rs(r.salary)}</span>
+              <span className={"hz-rep-prof" + (r.profit < 0 ? " neg" : "")}>{rs(r.profit)}</span>
+            </div>
+          ))}
+          {rows.filter((r) => r.has).length > 0 && (
+            <div className="hz-rep-row tot">
+              <span className="hz-rep-mn">{year} Total</span>
+              <span>{tot.ordersN}</span>
+              <span className="hz-rep-sale">{rs(tot.sales)}</span>
+              <span className="hz-rep-stock">− {rs(tot.stock)}</span>
+              <span className="hz-rep-sal">− {rs(tot.salary)}</span>
+              <span className={"hz-rep-prof" + (tot.profit < 0 ? " neg" : "")}>{rs(tot.profit)}</span>
+            </div>
+          )}
+        </div>
+        <div className="hz-repnote"><Receipt size={12} />Profit = Sales − Stock − Salaries (advances included). Rent, utilities &amp; sales tax not counted.</div>
+      </div>
+    </>
+  );
+}
+/* ----------------------------- Inventory -------------------------- */
 function Inventory({ ctx, branch, isAdmin }) {
   const inB = (x) => branch === "all" || x.branch === branch;
   const inv = ctx.inventory.filter(inB);
@@ -2128,7 +2241,6 @@ function Inventory({ ctx, branch, isAdmin }) {
         <Kpi icon={Package} label="Items Tracked" val={inv.length} c="#5A9CFF" />
         <Kpi icon={Boxes} label="Stock Value Now" val={rs(Math.round(stockValue))} c="#FFB22C" />
         <Kpi icon={ShoppingBag} label="Bought Today" val={rs(todaySpend)} c="#FF8A5C" />
-        <Kpi icon={Wallet} label="Profit Today" val={rs(todayProfit)} c={todayProfit < 0 ? "#FF5470" : "#29D3A6"} />
       </div>
       <div className="hz-invlayout">
         <div className="hz-card">
@@ -2162,10 +2274,8 @@ function Inventory({ ctx, branch, isAdmin }) {
                 </div>
               </div>
               <div className="hz-inv-right">
-                <div className="hz-inv-stock"><b>{it.stock}</b><span>{it.unit}</span></div>
                 {c > 0 && <div className="hz-inv-cost">~{rs(Math.round(c))}/{it.unit}</div>}
               </div>
-              <div className="hz-qadd2"><button onClick={() => ctx.addStock(it.id, 5)}>+5</button><button onClick={() => ctx.addStock(it.id, 10)}>+10</button></div>
               <div className="hz-macts"><button className="hz-mini" title="Edit item" aria-label="Edit item" onClick={() => setEditId(it.id)}><Pencil size={13} /></button><button className="hz-mini danger" title="Remove item" aria-label="Remove item" onClick={() => { if (askConfirm(`Remove "${it.name}" from inventory?`)) ctx.deleteInventory(it.id); }}><Trash2 size={13} /></button></div>
             </div>); })}
             {inv.length === 0 && <Empty text="No items yet — add one above." />}
@@ -3199,7 +3309,31 @@ const CSS = `
 .hz-closedpill{font-size:10px;font-weight:700;color:var(--rose);background:color-mix(in srgb,var(--rose) 14%,transparent);padding:3px 9px;border-radius:99px;text-transform:uppercase;}
 .hz-hbranch.closed{opacity:.72;}
 .hz-branchstatus{display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:12px 15px;margin-bottom:14px;}
+/* Reports table */
+.hz-reptable{display:flex;flex-direction:column;}
+.hz-rep-head,.hz-rep-row{display:grid;grid-template-columns:1.3fr .7fr 1fr 1fr 1fr 1fr;gap:8px;align-items:center;padding:10px 8px;}
+.hz-rep-head{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:700;border-bottom:1px solid var(--border);}
+.hz-rep-head span:not(:first-child),.hz-rep-row span:not(.hz-rep-mn){text-align:right;font-variant-numeric:tabular-nums;}
+.hz-rep-row{border-bottom:1px solid var(--border);font-size:12.5px;color:var(--text);}
+.hz-rep-mn{font-weight:700;}
+.hz-rep-sale{color:#29D3A6;font-weight:600;}
+.hz-rep-stock{color:#FF8A5C;}
+.hz-rep-sal{color:#FFB22C;}
+.hz-rep-prof{font-weight:800;color:#5A9CFF;font-family:var(--fm);}
+.hz-rep-prof.neg{color:var(--rose);}
+.hz-rep-row.tot{border-top:2px solid var(--text);border-bottom:none;font-size:13.5px;margin-top:2px;}
+.hz-rep-row.tot .hz-rep-mn{font-weight:800;}
+.hz-repnote{display:flex;align-items:center;gap:6px;margin-top:12px;padding:9px 11px;border-radius:9px;background:var(--surface2);font-size:11.5px;color:var(--muted);}
+@media (max-width:640px){
+  .hz-rep-head{display:none;}
+  .hz-rep-row{grid-template-columns:1fr 1fr;gap:4px 8px;padding:10px;background:var(--bg2);border-radius:10px;margin-bottom:8px;border:1px solid var(--border);}
+}
 .hz-daychips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;}
+.hz-osearch{display:flex;align-items:center;gap:8px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:0 11px;margin-bottom:10px;}
+.hz-osearch svg{color:var(--muted);flex-shrink:0;}
+.hz-osearch input{flex:1;border:none;background:transparent;padding:10px 0;color:var(--text);font-size:13px;outline:none;box-shadow:none!important;}
+.hz-osearch button{color:var(--muted);display:grid;place-items:center;}
+.hz-searchnote{font-size:11.5px;color:var(--muted);margin-bottom:10px;}
 .hz-daychip{padding:6px 12px;border-radius:8px;font-size:12px;font-weight:700;background:var(--bg2);border:1px solid var(--border);color:var(--muted);cursor:pointer;transition:.15s;}
 .hz-daychip:hover{border-color:var(--ember);color:var(--text);}
 .hz-daychip.on{color:#fff;background:linear-gradient(135deg,var(--ember),var(--saffron));border-color:transparent;}
