@@ -16,6 +16,31 @@ import { doc, collection, getDoc, getDocs, setDoc, updateDoc, deleteDoc, onSnaps
 // order) — this strips them before any write so the app never crashes on save.
 const sanitize = (obj) => JSON.parse(JSON.stringify(obj));
 
+/* Firestore caps a single document at 1 MB. The built-in dish photos are large
+   inline base64 data-URLs; if we stored the whole menu (with those images) in
+   the shared "hunza/meta" document, the doc would blow past 1 MB after only a
+   handful of dishes and Firestore would silently reject the write — the classic
+   "add a 9th dish, it shows locally, then vanishes on refresh" bug.
+
+   So before writing, we strip any heavy base64 image out of each menu item
+   (keeping a small photoUrl link if the user supplied one). The built-in seed
+   photos are re-attached from SEED_MENU on read, so the app still shows them. */
+const isHeavyImg = (v) => typeof v === "string" && v.startsWith("data:") && v.length > 500;
+const stripMenuImages = (menu) => (menu || []).map((m) => {
+  const out = { ...m };
+  if (isHeavyImg(out.img)) delete out.img;      // don't persist inline base64
+  return out;
+});
+const metaForWrite = (current) => ({ ...current, menu: stripMenuImages(current.menu) });
+/* On read, put the built-in seed photo back for any seed item whose image we
+   stripped before writing, so the picture still appears. User-added dishes keep
+   whatever photoUrl they set. */
+const restoreMenuImages = (menu, seed) => (menu || []).map((m) => {
+  if (m.img) return m;
+  const s = (seed || []).find((x) => x.id === m.id);
+  return s && s.img ? { ...m, img: s.img } : m;
+});
+
 /* ================================================================== */
 /*  HUNZA SIZZLE — multi-branch restaurant system + online ordering    */
 /*  Branches: G-9/1 & I-8 Markaz (Islamabad). Same system both sides.  */
@@ -469,7 +494,7 @@ export default function App() {
       const d = snap.data();
       if (JSON.stringify(d) !== JSON.stringify(remoteMetaRef.current)) {
         remoteMetaRef.current = d;
-        if (d.menu) setMenu(d.menu);
+        if (d.menu) setMenu(restoreMenuImages(d.menu, SEED_MENU));
         if (d.inventory) setInventory(d.inventory);
         if (d.purchases) setPurchases(d.purchases);
         if (d.requests) setRequests(d.requests);
@@ -499,7 +524,7 @@ export default function App() {
     const json = JSON.stringify(current);
     if (json === JSON.stringify(remoteMetaRef.current)) return;
     remoteMetaRef.current = current;
-    setDoc(doc(db, "hunza", "meta"), sanitize(current), { merge: true }).catch((e) => console.error("Firestore meta write failed", e));
+    setDoc(doc(db, "hunza", "meta"), sanitize(metaForWrite(current)), { merge: true }).catch((e) => console.error("Firestore meta write failed", e));
   }, [menu, inventory, purchases, requests, branchOpen]);
 
   /* On load, work out where the visitor should land:
