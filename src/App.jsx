@@ -314,7 +314,7 @@ const BASE_INV = [
   { name: "Pepsi Cans", unit: "pcs", stock: 18, low: 24 },
 ];
 const SEED_INVENTORY = BRANCHES.flatMap((b, bi) =>
-  BASE_INV.map((it, i) => ({ id: `${b.id}-i${i}`, branch: b.id, ...it, stock: +(it.stock * (bi ? 1.6 : 1)).toFixed(1) }))
+  BASE_INV.map((it, i) => ({ id: `${b.id}-i${i}`, branch: b.id, ...it, stock: +(it.stock * (bi ? 1.6 : 1)).toFixed(1), addedBy: "Initial setup", addedAt: now() - 7 * 24 * 3600 * 1000 }))
 );
 const SEED_REQUESTS = [
   { id: "r1", branch: "g91", item: "Mozzarella", qty: 5, unit: "kg", note: "Running low for pizzas", by: "Kitchen G-9/1", status: "pending", createdAt: now() - 6 * 60000 },
@@ -328,7 +328,39 @@ const SEED_REQUESTS = [
    ================================================================== */
 export default function App() {
   const [dark, setDark] = useState(true);
-  const [session, setSession] = useState(null);
+  /* Keep the staff member logged in across page refreshes for up to an hour,
+     so a reload (or the app briefly closing) doesn't kick them out mid-shift.
+     After an hour of no login the session expires and they sign in again. */
+  const SESSION_MS = 60 * 60 * 1000;  // stay logged in for 1 hour of inactivity
+  const [session, setSession] = useState(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem("hz_session") || "null");
+      if (raw && raw.exp > Date.now()) {
+        /* Sliding window: refresh (or reopening the tab) renews the hour, so a
+           busy user is never kicked out mid-shift. Only a full hour with no
+           app open — or tapping Logout — ends the session. */
+        localStorage.setItem("hz_session", JSON.stringify({ user: raw.user, exp: Date.now() + SESSION_MS }));
+        return raw.user;
+      }
+      localStorage.removeItem("hz_session");
+    } catch {}
+    return null;
+  });
+  useEffect(() => {
+    try {
+      if (session) localStorage.setItem("hz_session", JSON.stringify({ user: session, exp: Date.now() + SESSION_MS }));
+      else localStorage.removeItem("hz_session");
+    } catch {}
+  }, [session]);
+  /* Keep the session fresh while the app is open: every few minutes, and on
+     any tap/keypress, push the expiry forward another hour. */
+  useEffect(() => {
+    if (!session) return;
+    const bump = () => { try { localStorage.setItem("hz_session", JSON.stringify({ user: session, exp: Date.now() + SESSION_MS })); } catch {} };
+    const iv = setInterval(bump, 5 * 60 * 1000);
+    window.addEventListener("click", bump); window.addEventListener("keydown", bump);
+    return () => { clearInterval(iv); window.removeEventListener("click", bump); window.removeEventListener("keydown", bump); };
+  }, [session]);
   const [page, setPage] = useState("home");
   const [preview, setPreview] = useState(null); // {branch, table} — QR dine-in entry
   const [users, setUsers] = useState(SEED_USERS);
@@ -1199,16 +1231,44 @@ function BranchSwitch({ value, onChange, includeAll }) {
 }
 
 /* --------------------------- Waiter ------------------------------- */
+/* One order card on the waiter's screen. Shows destination, items, total and
+   the right action — or a "Completed" stamp with the time once served. */
+function WaiterOrderCard({ o, ctx }) {
+  const T = typeMeta(o); const isReady = o.status === "ready"; const isDone = o.status === "completed";
+  const dlabel = o.type === "carhop" ? "Deliver to CAR" : o.type === "takeaway" ? "Pickup counter" : "Serve at TABLE";
+  const dval = o.type === "carhop" ? `${o.vehicle} · ${o.spot}`
+    : o.type === "takeaway" ? [o.customer, o.phone].filter(Boolean).join(" · ") || "Counter"
+    : o.table;
+  return (
+    <div className={"hz-worder" + (flashing(ctx, o.id) ? " flash" : "") + (isReady ? " ready" : "") + (isDone ? " done" : "")}>
+      <div className="hz-trow"><span className="hz-tq"><Hash size={12} />{o.q}</span><Badge s={o.status} />{(o.source === "qr" || o.source === "online" || o.source === "car") && <span className="hz-srctag">{o.source} · auto</span>}<span className="hz-word-amt">{rs(grand(o))}</span></div>
+      <div className="hz-deliverto"><T.icon size={14} /><span>{dlabel}</span><b>{dval}</b></div>
+      <div className="hz-witems">{o.items.map((i) => `${i.qty}× ${i.name}`).join(" · ")}{o.notes && <em> · “{o.notes}”</em>}</div>
+      {isDone
+        ? <div className="hz-wdone"><CheckCircle2 size={14} />Completed · {clock(o.createdAt)}</div>
+        : isReady
+        ? <button className="hz-deliverbtn" onClick={() => ctx.markServed(o.id)}>{o.type === "carhop" ? <Car size={15} /> : <MapPin size={15} />}{o.type === "carhop" ? "Delivered to car" : o.type === "takeaway" ? "Handed over" : "Served to table"}</button>
+        : <div className="hz-wstatusnote"><Clock size={13} />Preparing… ETA {etaMins(o)}m</div>}
+      {!isDone && o.type !== "delivery" && <AddItemsBar o={o} ctx={ctx} />}
+    </div>
+  );
+}
 /* Waiter dashboard — dine-in, curbside and pickup orders assigned to them.
    Delivery orders are excluded; those belong to riders. */
 function Waiter({ ctx, me, branch }) {
   const [tab, setTab] = useState("orders");
-  const mine = ctx.orders.filter((o) => o.waiter === me && o.type !== "delivery" && ACTIVE(o.status));
-  mine.sort((a, b) => (STAGES.indexOf(b.status) - STAGES.indexOf(a.status)));
+  /* The waiter sees every order that still needs action (active), plus the ones
+     they finished today — so they can review the day's work and totals without
+     old history piling up. Completed orders from earlier days drop off; the
+     numbers for those live in the summary cards above. */
+  const mine = ctx.orders.filter((o) => o.waiter === me && o.type !== "delivery" && (ACTIVE(o.status) || (o.status === "completed" && isToday(o.createdAt))));
+  mine.sort((a, b) => (ACTIVE(b.status) - ACTIVE(a.status)) || (STAGES.indexOf(b.status) - STAGES.indexOf(a.status)) || (b.createdAt - a.createdAt));
+  const active = mine.filter((o) => ACTIVE(o.status));
+  const doneToday = mine.filter((o) => o.status === "completed").length;
   const ready = mine.filter((o) => o.status === "ready").length;
   return (
     <div className="hz-wrap narrow">
-      <Head title={`Hi, ${me}`} sub={`${branchName(branch)} · ${mine.length} active · ${ready} ready`} />
+      <Head title={`Hi, ${me}`} sub={`${branchName(branch)} · ${active.length} active · ${ready} ready · ${doneToday} done today`} />
       <MyDay ctx={ctx} me={me} />
       <div className="hz-segt">
         <button className={tab === "orders" ? "on" : ""} onClick={() => setTab("orders")}>My Orders {mine.length > 0 && <em>{mine.length}</em>}</button>
@@ -1217,27 +1277,10 @@ function Waiter({ ctx, me, branch }) {
       {tab === "orders" ? (
         <div className="hz-stack">
           {mine.length === 0 && <Empty text="No active orders. New QR / online / curbside orders auto-arrive here." />}
-          {mine.map((o) => {
-            const T = typeMeta(o); const isReady = o.status === "ready";
-            const dlabel = o.type === "carhop" ? "Deliver to CAR" : o.type === "takeaway" ? "Pickup counter" : "Serve at TABLE";
-            /* Takeaway has no table or car, so show who is collecting it —
-               with their phone when the waiter took one, so the counter can
-               call the customer when the order is ready. */
-            const dval = o.type === "carhop" ? `${o.vehicle} · ${o.spot}`
-              : o.type === "takeaway" ? [o.customer, o.phone].filter(Boolean).join(" · ") || "Counter"
-              : o.table;
-            return (
-              <div className={"hz-worder" + (flashing(ctx, o.id) ? " flash" : "") + (isReady ? " ready" : "")} key={o.id}>
-                <div className="hz-trow"><span className="hz-tq"><Hash size={12} />{o.q}</span><Badge s={o.status} />{(o.source === "qr" || o.source === "online" || o.source === "car") && <span className="hz-srctag">{o.source} · auto</span>}</div>
-                <div className="hz-deliverto"><T.icon size={14} /><span>{dlabel}</span><b>{dval}</b></div>
-                <div className="hz-witems">{o.items.map((i) => `${i.qty}× ${i.name}`).join(" · ")}{o.notes && <em> · “{o.notes}”</em>}</div>
-                {isReady
-                  ? <button className="hz-deliverbtn" onClick={() => ctx.markServed(o.id)}>{o.type === "carhop" ? <Car size={15} /> : <MapPin size={15} />}{o.type === "carhop" ? "Delivered to car" : o.type === "takeaway" ? "Handed over" : "Served to table"}</button>
-                  : <div className="hz-wstatusnote"><Clock size={13} />Preparing… ETA {etaMins(o)}m</div>}
-                {o.type !== "delivery" && <AddItemsBar o={o} ctx={ctx} />}
-              </div>
-            );
-          })}
+          {active.length > 0 && <div className="hz-wsec">Active orders</div>}
+          {mine.filter((o) => ACTIVE(o.status)).map((o) => <WaiterOrderCard key={o.id} o={o} ctx={ctx} />)}
+          {doneToday > 0 && <div className="hz-wsec">Completed today · {doneToday}</div>}
+          {mine.filter((o) => o.status === "completed").map((o) => <WaiterOrderCard key={o.id} o={o} ctx={ctx} />)}
         </div>
       ) : <TakeOrder ctx={ctx} me={me} branch={branch} onDone={() => setTab("orders")} />}
     </div>
@@ -2074,13 +2117,15 @@ function Inventory({ ctx, branch, isAdmin }) {
               <button className="hz-sf-btn" disabled={!nm.trim() || !(+qty > 0)} onClick={addStock}><Plus size={15} />Add stock</button>
             </div>
           </div>
-          <div className="hz-invgrid">{inv.map((it) => { const lowFlag = it.stock <= it.low; const c = lastCost(it.name, it.branch);
+          <div className="hz-invgrid">{inv.map((it) => { const lowFlag = it.stock <= it.low; const c = lastCost(it.name, it.branch); const lastP = purchases.filter((p) => p.item.toLowerCase() === it.name.toLowerCase() && p.branch === it.branch).sort((x, y) => y.date - x.date)[0];
             if (editId === it.id) return <InvEditRow key={it.id} it={it} onCancel={() => setEditId(null)} onSave={(patch) => { ctx.updateInventory(it.id, patch); setEditId(null); }} />;
             return (<div className={"hz-invrow2" + (lowFlag ? " low" : "")} key={it.id}>
               <div className="hz-inv-ic"><Package size={17} /></div>
               <div className="hz-inv-main">
                 <div className="hz-inv-top"><b>{it.name}</b>{branch === "all" && <BranchTag b={it.branch} />}{lowFlag && <span className="hz-lowtag">LOW</span>}</div>
                 <div className="hz-inv-meta">
+                  <span><Boxes size={11} />In stock: {it.stock} {it.unit} · low at {it.low} {it.unit}{c > 0 ? ` · worth ~${rs(Math.round(it.stock * c))}` : ""}</span>
+                  {lastP && <span><Receipt size={11} />Last buy: {lastP.qty} {it.unit} for {rs(lastP.cost)} · {dateShort(lastP.date)}{lastP.by ? ` · ${lastP.by}` : ""}</span>}
                   {it.addedBy && <span><Plus size={11} />Added by {it.addedBy}{it.addedAt ? ` · ${dateShort(it.addedAt)}` : ""}</span>}
                   {it.editedBy && it.editedAt && <span><Pencil size={11} />Edited by {it.editedBy} · {dateShort(it.editedAt)}</span>}
                 </div>
@@ -2815,6 +2860,11 @@ const CSS = `
 .hz-additems-confirm{width:100%;margin-top:9px;display:inline-flex;align-items:center;justify-content:center;gap:6px;height:38px;border-radius:9px;font-size:12.5px;font-weight:700;color:#0c0a08;background:linear-gradient(135deg,var(--jade),var(--saffron));border:0;cursor:pointer;}
 .hz-additems-confirm:disabled{opacity:.45;cursor:not-allowed;}
 .hz-worder{background:var(--surface);border:1px solid var(--border);border-radius:13px;padding:14px;}
+.hz-wsec{font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:6px 2px -2px;}
+.hz-worder.done{opacity:.72;}
+.hz-worder.done{opacity:.72;}
+.hz-word-amt{margin-left:auto;font-size:13px;font-weight:800;color:var(--jade);font-family:var(--fm);}
+.hz-wdone{display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:700;color:var(--jade);padding:6px 0 2px;}
 .hz-worder.ready{border-color:var(--jade);box-shadow:0 0 0 1px var(--jade);}
 .hz-deliverto{display:flex;align-items:center;gap:7px;font-size:12.5px;margin:9px 0;color:var(--muted);}
 .hz-deliverto b{margin-left:auto;font-family:var(--fm);color:var(--text);font-size:13px;}
