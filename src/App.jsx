@@ -82,7 +82,7 @@ const isThisYear = (ts) => new Date(ts).getFullYear() === new Date().getFullYear
 const dayLabel = (ts) => isToday(ts) ? "Today" : isYesterday(ts) ? "Yesterday" : new Date(ts).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 
 const BRANCHES = [
-  { id: "g91", name: "G-9/1", area: "Islamabad", addr: "Karachi Company, G-9/1" },
+  { id: "g91", name: "G-9/1", area: "Islamabad", addr: "Al Mujahid Market, G-9/1, Islamabad" },
   { id: "i8", name: "I-8 Markaz", area: "Islamabad", addr: "I-8 Markaz, near Eidgah" },
 ];
 const branchName = (id) => BRANCHES.find((b) => b.id === id)?.name || id;
@@ -860,9 +860,23 @@ export default function App() {
   }
 
   if (!staffIn) {
+    // Same "wait for live data" gate as the staff side: on a fresh page load the
+    // menu/branch data would briefly show the built-in defaults and then snap to
+    // the real Firestore values (the ~5s flash of old data on the website).
+    // Show a small loader until the first real menu arrives.
+    const custLoading = FIREBASE_READY && !online;
     return (
       <div className="hz" data-theme={dark ? "dark" : "light"}><style>{CSS}</style>
-        {page === "order"
+        {custLoading ? (
+          <div className="hz-bootwrap">
+            <BrandLockup size={46} />
+            <div className="hz-syncing" style={{ paddingTop: 30 }}>
+              <div className="hz-syncing-spin" />
+              <b>Loading menu…</b>
+              <span>Getting the latest prices &amp; dishes</span>
+            </div>
+          </div>
+        ) : page === "order"
           ? <OrderFlow ctx={ctx} dark={dark} setDark={setDark} onHome={() => setPage("home")} onStaff={() => setPage("staff")} />
           : page === "staff"
             ? <Login onLogin={setSession} dark={dark} setDark={setDark} users={users} onHome={() => setPage("home")} onOrder={() => setPage("order")} />
@@ -1003,7 +1017,10 @@ function HomePage({ menu, dark, setDark, branchOpen, onOrder, onStaff }) {
 
       <footer className="hz-hfoot">
         <div className="hz-brand"><div className="hz-logo"><HunzaLogo size={26} compact /></div><div className="hz-bn">De-Hunza <span>Sizzle</span></div></div>
-        <span>G-9/1 · I-8 Markaz, Islamabad · © {new Date().getFullYear()} De-Hunza Sizzle</span>
+        <div className="hz-foot-meta">
+          <span>G-9/1 · I-8 Markaz, Islamabad · © {new Date().getFullYear()} De-Hunza Sizzle</span>
+          <span className="hz-credit">Designed &amp; developed by <b>MM Tech &amp; AI</b></span>
+        </div>
       </footer>
     </div>
   );
@@ -2728,7 +2745,7 @@ function PrintModal({ order: o, onClose }) {
           <div className="hz-rc-row total"><span>TOTAL</span><b>{rs(subtotal + fee + tax)}</b></div>
           <div className="hz-rc-row"><span>Payment</span><b>{(o.payMethod === "card" ? "CARD/ONLINE · " : o.payMethod ? "CASH · " : "") + (o.payment === "paid" ? "PAID" : o.payment === "pending" ? "PENDING VERIFICATION" : "UNPAID")}</b></div>
           <div className="hz-rc-hr" />
-          <div className="hz-rc-foot">Thank you for choosing De-Hunza Sizzle!<br />Chinese &amp; Fast Food · Islamabad</div>
+          <div className="hz-rc-foot">Thank you for choosing De-Hunza Sizzle!<br />Chinese &amp; Fast Food · Islamabad<br /><span style={{ fontSize: "9px", opacity: .8 }}>Software by MM Tech &amp; AI</span></div>
         </div>
       </div>
     </div>
@@ -3299,6 +3316,13 @@ const CSS = `
 .hz-hband-in .hz-cta{position:relative;background:#1a1410;color:#fff;}
 .hz-hfoot{max-width:1100px;margin:46px auto 0;padding:24px 20px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;}
 .hz-hfoot>span{font-size:12px;color:var(--muted);}
+.hz-foot-meta{display:flex;flex-direction:column;align-items:flex-end;gap:3px;text-align:right;}
+.hz-foot-meta>span{font-size:12px;color:var(--muted);}
+.hz-credit{font-size:11px!important;opacity:.8;}
+.hz-credit b{color:var(--ember);font-weight:700;}
+@media (max-width:560px){.hz-foot-meta{align-items:flex-start;text-align:left;}}
+/* Customer boot loader (menu sync gate) */
+.hz-bootwrap{min-height:70vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:30px 20px;}
 
 .hz-ohome{display:inline-flex;align-items:center;gap:6px;padding:8px 13px;border-radius:99px;font-size:12.5px;font-weight:600;background:var(--surface);border:1px solid var(--border);color:var(--text);transition:.15s;}
 .hz-ohome:hover{border-color:var(--ember);}
