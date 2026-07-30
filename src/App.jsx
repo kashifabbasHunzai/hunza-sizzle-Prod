@@ -2111,100 +2111,195 @@ function ManagerOps({ ctx, branch, onPrint }) {
 /* Stock management for admins and managers. Adding stock records both the
    quantity and what was paid, which feeds the cost figures on the dashboard. */
 /* ----------------------------- Reports ---------------------------- */
-/* Admin-only. A month-by-month breakdown for any year the business has data
-   in: sales, stock bought, salaries paid, and the resulting profit. The owner
-   picks a year and sees all 12 months, plus a year total, and can print it. */
+/* Admin-only reporting. Four report types (General / Sales / Stock / Salaries),
+   each filterable by year and — where it makes sense — by a specific month.
+   "General" is the month-by-month P&L. "Stock" lists every purchase (kya kya
+   aaya). "Sales" breaks orders down by type. "Salaries" shows what each staff
+   member was paid. Every report can be printed / saved as PDF. */
 function Reports({ ctx, branch }) {
   const inB = (x) => branch === "all" || x.branch === branch;
   const orders = ctx.orders.filter((o) => inB(o) && o.status !== "cancelled");
   const purchases = (ctx.purchases || []).filter(inB);
   const users = ctx.users.filter((u) => u.role !== "admin" && inB(u));
 
-  // Which years have any activity? Always include the current year.
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const years = useMemo(() => {
     const s = new Set([new Date().getFullYear()]);
     orders.forEach((o) => s.add(new Date(o.createdAt).getFullYear()));
     purchases.forEach((p) => s.add(new Date(p.date).getFullYear()));
     return [...s].sort((a, b) => b - a);
   }, [orders, purchases]);
-  const [year, setYear] = useState(years[0]);
 
-  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  const rows = MONTHS.map((mn, m) => {
-    const inMonth = (ts) => { const d = new Date(ts); return d.getFullYear() === year && d.getMonth() === m; };
-    const sales = orders.filter((o) => inMonth(o.createdAt)).reduce((a, b) => a + grand(b), 0);
-    const ordersN = orders.filter((o) => inMonth(o.createdAt)).length;
-    const stock = purchases.filter((p) => inMonth(p.date)).reduce((a, b) => a + b.cost, 0);
+  const [cat, setCat] = useState("general");   // general | sales | stock | salaries
+  const [year, setYear] = useState(years[0]);
+  const [month, setMonth] = useState(-1);       // -1 = whole year, 0-11 = a month
+
+  const money = (n) => "Rs " + Math.round(n).toLocaleString("en-PK");
+  const inSel = (ts) => { const d = new Date(ts); return d.getFullYear() === year && (month === -1 || d.getMonth() === month); };
+  const periodLabel = month === -1 ? `${year}` : `${MONTHS[month]} ${year}`;
+  const salMonthMatch = (mkey) => { const [yy, mm] = mkey.split("-").map(Number); return yy === year && (month === -1 || mm === month + 1); };
+
+  // ---- data per category ----
+  const selOrders = orders.filter((o) => inSel(o.createdAt));
+  const selPurch = purchases.filter((p) => inSel(p.date)).sort((a, b) => b.date - a.date);
+
+  // General: month-by-month P&L for the whole year (ignores month filter)
+  const genRows = MONTHS.map((mn, m) => {
+    const im = (ts) => { const d = new Date(ts); return d.getFullYear() === year && d.getMonth() === m; };
+    const sales = orders.filter((o) => im(o.createdAt)).reduce((a, b) => a + grand(b), 0);
+    const ordersN = orders.filter((o) => im(o.createdAt)).length;
+    const stock = purchases.filter((p) => im(p.date)).reduce((a, b) => a + b.cost, 0);
     const salary = users.reduce((a, u) => a + (u.payments || []).filter((p) => { const [yy, mm] = p.month.split("-").map(Number); return yy === year && mm === m + 1; }).reduce((x, p) => x + p.amount, 0), 0);
-    const adv = users.reduce((a, u) => a + (u.advances || []).filter((ad) => inMonth(ad.date)).reduce((x, ad) => x + ad.amount, 0), 0);
-    const profit = sales - stock - salary - adv;
-    return { mn, m, sales, ordersN, stock, salary: salary + adv, profit, has: sales || stock || salary || adv };
+    const adv = users.reduce((a, u) => a + (u.advances || []).filter((ad) => im(ad.date)).reduce((x, ad) => x + ad.amount, 0), 0);
+    return { mn, m, sales, ordersN, stock, salary: salary + adv, profit: sales - stock - salary - adv, has: sales || stock || salary || adv };
   });
-  const tot = rows.reduce((a, r) => ({ sales: a.sales + r.sales, ordersN: a.ordersN + r.ordersN, stock: a.stock + r.stock, salary: a.salary + r.salary, profit: a.profit + r.profit }), { sales: 0, ordersN: 0, stock: 0, salary: 0, profit: 0 });
+  const genTot = genRows.reduce((a, r) => ({ sales: a.sales + r.sales, ordersN: a.ordersN + r.ordersN, stock: a.stock + r.stock, salary: a.salary + r.salary, profit: a.profit + r.profit }), { sales: 0, ordersN: 0, stock: 0, salary: 0, profit: 0 });
+
+  // Sales by order type
+  const TYPES = [["dinein", "Dine-in"], ["takeaway", "Takeaway"], ["carhop", "Curbside"], ["delivery", "Delivery"]];
+  const salesByType = TYPES.map(([id, label]) => { const os = selOrders.filter((o) => o.type === id); return { label, n: os.length, sum: os.reduce((a, b) => a + grand(b), 0) }; }).filter((r) => r.n > 0);
+  const salesTotal = selOrders.reduce((a, b) => a + grand(b), 0);
+
+  // Stock: group purchases by item, plus the raw list
+  const stockByItem = Object.values(selPurch.reduce((acc, p) => { const k = p.item.toLowerCase(); (acc[k] = acc[k] || { item: p.item, unit: p.unit, qty: 0, cost: 0, n: 0 }); acc[k].qty += p.qty; acc[k].cost += p.cost; acc[k].n += 1; return acc; }, {})).sort((a, b) => b.cost - a.cost);
+  const stockTotal = selPurch.reduce((a, b) => a + b.cost, 0);
+
+  // Salaries paid per staff in the selected period
+  const salRows = users.map((u) => {
+    const paid = (u.payments || []).filter((p) => salMonthMatch(p.month)).reduce((x, p) => x + p.amount, 0);
+    const adv = (u.advances || []).filter((a) => inSel(a.date)).reduce((x, a) => x + a.amount, 0);
+    return { name: u.name, role: ROLE_META[u.role]?.label || u.role, branch: u.branch, salary: u.salary || 0, paid, adv };
+  }).filter((r) => r.paid || r.adv);
+  const salTot = salRows.reduce((a, r) => ({ paid: a.paid + r.paid, adv: a.adv + r.adv }), { paid: 0, adv: 0 });
+
+  const CATS = [["general", BarChart3, "General"], ["sales", TrendingUp, "Sales"], ["stock", Boxes, "Stock"], ["salaries", Wallet, "Salaries"]];
 
   const printReport = () => {
-    const w = window.open("", "_blank", "width=800,height=900");
+    const w = window.open("", "_blank", "width=820,height=920");
     if (!w) return;
-    const money = (n) => "Rs " + Math.round(n).toLocaleString("en-PK");
-    const body = rows.filter((r) => r.has).map((r) => `<tr><td>${r.mn} ${year}</td><td style="text-align:right">${r.ordersN}</td><td style="text-align:right">${money(r.sales)}</td><td style="text-align:right">${money(r.stock)}</td><td style="text-align:right">${money(r.salary)}</td><td style="text-align:right;font-weight:700;color:${r.profit < 0 ? "#c00" : "#080"}">${money(r.profit)}</td></tr>`).join("");
-    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>De-Hunza Sizzle — ${year} Report</title>
-      <style>body{font-family:Arial,sans-serif;padding:30px;color:#111}h1{font-size:20px;margin:0}h2{font-size:13px;color:#666;font-weight:400;margin:2px 0 20px}
-      table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:9px 10px;border-bottom:1px solid #ddd}th{text-align:left;background:#f4f4f4;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
-      tr.tot td{border-top:2px solid #111;font-weight:800;font-size:14px}tfoot{}</style></head><body>
-      <h1>The Hunza Sizzle — Annual Report ${year}</h1><h2>${branch === "all" ? "All branches" : branchName(branch)} · Generated ${new Date().toLocaleDateString("en-GB")}</h2>
-      <table><thead><tr><th>Month</th><th style="text-align:right">Orders</th><th style="text-align:right">Sales</th><th style="text-align:right">Stock bought</th><th style="text-align:right">Salaries</th><th style="text-align:right">Profit</th></tr></thead>
-      <tbody>${body || '<tr><td colspan="6" style="text-align:center;color:#999;padding:30px">No data for this year</td></tr>'}</tbody>
-      <tfoot><tr class="tot"><td>${year} Total</td><td style="text-align:right">${tot.ordersN}</td><td style="text-align:right">${money(tot.sales)}</td><td style="text-align:right">${money(tot.stock)}</td><td style="text-align:right">${money(tot.salary)}</td><td style="text-align:right;color:${tot.profit < 0 ? "#c00" : "#080"}">${money(tot.profit)}</td></tr></tfoot>
-      </table><p style="margin-top:30px;font-size:10px;color:#999">Profit = Sales − Stock − Salaries. Rent, utilities and sales tax not included. Software by MM Tech &amp; AI.</p>
-      </body></html>`);
+    let title = "", head = "", rowsHtml = "", footHtml = "";
+    if (cat === "general") {
+      title = "Annual P&L";
+      head = "<tr><th>Month</th><th class=r>Orders</th><th class=r>Sales</th><th class=r>Stock</th><th class=r>Salaries</th><th class=r>Profit</th></tr>";
+      rowsHtml = genRows.filter((r) => r.has).map((r) => `<tr><td>${r.mn} ${year}</td><td class=r>${r.ordersN}</td><td class=r>${money(r.sales)}</td><td class=r>${money(r.stock)}</td><td class=r>${money(r.salary)}</td><td class="r b" style="color:${r.profit < 0 ? "#c00" : "#080"}">${money(r.profit)}</td></tr>`).join("");
+      footHtml = `<tr class=tot><td>${year} Total</td><td class=r>${genTot.ordersN}</td><td class=r>${money(genTot.sales)}</td><td class=r>${money(genTot.stock)}</td><td class=r>${money(genTot.salary)}</td><td class="r" style="color:${genTot.profit < 0 ? "#c00" : "#080"}">${money(genTot.profit)}</td></tr>`;
+    } else if (cat === "sales") {
+      title = "Sales by type · " + periodLabel;
+      head = "<tr><th>Order type</th><th class=r>Orders</th><th class=r>Sales</th></tr>";
+      rowsHtml = salesByType.map((r) => `<tr><td>${r.label}</td><td class=r>${r.n}</td><td class=r>${money(r.sum)}</td></tr>`).join("");
+      footHtml = `<tr class=tot><td>Total</td><td class=r>${selOrders.length}</td><td class=r>${money(salesTotal)}</td></tr>`;
+    } else if (cat === "stock") {
+      title = "Stock purchased · " + periodLabel;
+      head = "<tr><th>Item</th><th class=r>Qty</th><th class=r>Buys</th><th class=r>Total cost</th></tr>";
+      rowsHtml = stockByItem.map((r) => `<tr><td>${r.item}</td><td class=r>${r.qty} ${r.unit}</td><td class=r>${r.n}</td><td class=r>${money(r.cost)}</td></tr>`).join("");
+      footHtml = `<tr class=tot><td>Total</td><td class=r></td><td class=r>${selPurch.length}</td><td class=r>${money(stockTotal)}</td></tr>`;
+    } else {
+      title = "Salaries paid · " + periodLabel;
+      head = "<tr><th>Staff</th><th>Role</th><th class=r>Salary/mo</th><th class=r>Paid</th><th class=r>Advance</th></tr>";
+      rowsHtml = salRows.map((r) => `<tr><td>${r.name}</td><td>${r.role}</td><td class=r>${money(r.salary)}</td><td class=r>${money(r.paid)}</td><td class=r>${money(r.adv)}</td></tr>`).join("");
+      footHtml = `<tr class=tot><td colspan=3>Total</td><td class=r>${money(salTot.paid)}</td><td class=r>${money(salTot.adv)}</td></tr>`;
+    }
+    w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>The Hunza Sizzle — ${title}</title>
+      <style>body{font-family:Arial,sans-serif;padding:30px;color:#111}h1{font-size:20px;margin:0}h2{font-size:12px;color:#666;font-weight:400;margin:2px 0 20px}
+      table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:8px 10px;border-bottom:1px solid #ddd}th{text-align:left;background:#f4f4f4;font-size:10px;text-transform:uppercase;letter-spacing:.04em}
+      .r{text-align:right}.b{font-weight:700}tr.tot td{border-top:2px solid #111;font-weight:800;font-size:14px}</style></head><body>
+      <h1>The Hunza Sizzle — ${title}</h1><h2>${branch === "all" ? "All branches" : branchName(branch)} · Generated ${new Date().toLocaleDateString("en-GB")}</h2>
+      <table><thead>${head}</thead><tbody>${rowsHtml || '<tr><td colspan="6" style="text-align:center;color:#999;padding:30px">No data for this period</td></tr>'}</tbody><tfoot>${rowsHtml ? footHtml : ""}</tfoot></table>
+      <p style="margin-top:30px;font-size:10px;color:#999">Software by MM Tech &amp; AI · The Hunza Sizzle</p></body></html>`);
     w.document.close(); setTimeout(() => { w.focus(); w.print(); }, 250);
   };
 
   return (
     <>
       <div className="hz-card-h" style={{ marginBottom: 12 }}>
-        <div><h3 style={{ margin: 0 }}>Annual Reports</h3><span className="hz-card-sub">month-by-month · sales, stock &amp; profit</span></div>
+        <div><h3 style={{ margin: 0 }}>Reports</h3><span className="hz-card-sub">{branch === "all" ? "all branches" : branchName(branch)} · pick a report, year &amp; month</span></div>
         <button className="hz-printbtn" onClick={printReport}><Printer size={14} />Print / Save PDF</button>
       </div>
-      <div className="hz-segt sm" style={{ maxWidth: 340, flexWrap: "wrap" }}>
-        {years.map((y) => <button key={y} className={year === y ? "on" : ""} onClick={() => setYear(y)}>{y}</button>)}
+
+      {/* Report category */}
+      <div className="hz-repcats">
+        {CATS.map(([id, Icon, label]) => (
+          <button key={id} className={"hz-repcat" + (cat === id ? " on" : "")} onClick={() => setCat(id)}><Icon size={15} />{label}</button>
+        ))}
       </div>
-      <div className="hz-mkpis" style={{ marginTop: 4 }}>
-        <Kpi icon={TrendingUp} label={`${year} Sales`} val={rs(tot.sales)} c="#29D3A6" />
-        <Kpi icon={Boxes} label={`${year} Stock`} val={rs(tot.stock)} c="#FF8A5C" />
-        <Kpi icon={Wallet} label={`${year} Salaries`} val={rs(tot.salary)} c="#FFB22C" />
-        <Kpi icon={Receipt} label={`${year} Profit`} val={rs(tot.profit)} c={tot.profit < 0 ? "#FF5470" : "#5A9CFF"} />
+
+      {/* Year + month filter */}
+      <div className="hz-repfilter">
+        <div className="hz-repfilt-g"><span>Year</span><div className="hz-segt sm" style={{ margin: 0, flexWrap: "wrap" }}>{years.map((y) => <button key={y} className={year === y ? "on" : ""} onClick={() => setYear(y)}>{y}</button>)}</div></div>
+        {cat !== "general" && <div className="hz-repfilt-g"><span>Month</span>
+          <select className="hz-repmonth" value={month} onChange={(e) => setMonth(+e.target.value)}>
+            <option value={-1}>Whole year</option>
+            {MONTHS.map((mn, i) => <option key={i} value={i}>{mn} {year}</option>)}
+          </select></div>}
       </div>
-      <div className="hz-card" style={{ marginTop: 14 }}>
-        <div className="hz-reptable">
-          <div className="hz-rep-head"><span>Month</span><span>Orders</span><span>Sales</span><span>Stock</span><span>Salaries</span><span>Profit</span></div>
-          {rows.filter((r) => r.has).length === 0 && <Empty text={`No data recorded for ${year} yet.`} />}
-          {rows.filter((r) => r.has).map((r) => (
-            <div className="hz-rep-row" key={r.m}>
-              <span className="hz-rep-mn">{r.mn}</span>
-              <span>{r.ordersN}</span>
-              <span className="hz-rep-sale">{rs(r.sales)}</span>
-              <span className="hz-rep-stock">− {rs(r.stock)}</span>
-              <span className="hz-rep-sal">− {rs(r.salary)}</span>
-              <span className={"hz-rep-prof" + (r.profit < 0 ? " neg" : "")}>{rs(r.profit)}</span>
-            </div>
-          ))}
-          {rows.filter((r) => r.has).length > 0 && (
-            <div className="hz-rep-row tot">
-              <span className="hz-rep-mn">{year} Total</span>
-              <span>{tot.ordersN}</span>
-              <span className="hz-rep-sale">{rs(tot.sales)}</span>
-              <span className="hz-rep-stock">− {rs(tot.stock)}</span>
-              <span className="hz-rep-sal">− {rs(tot.salary)}</span>
-              <span className={"hz-rep-prof" + (tot.profit < 0 ? " neg" : "")}>{rs(tot.profit)}</span>
-            </div>
-          )}
+
+      {/* ---- GENERAL ---- */}
+      {cat === "general" && <>
+        <div className="hz-mkpis" style={{ marginTop: 4 }}>
+          <Kpi icon={TrendingUp} label={`${year} Sales`} val={rs(genTot.sales)} c="#29D3A6" />
+          <Kpi icon={Boxes} label={`${year} Stock`} val={rs(genTot.stock)} c="#FF8A5C" />
+          <Kpi icon={Wallet} label={`${year} Salaries`} val={rs(genTot.salary)} c="#FFB22C" />
+          <Kpi icon={Receipt} label={`${year} Profit`} val={rs(genTot.profit)} c={genTot.profit < 0 ? "#FF5470" : "#5A9CFF"} />
         </div>
-        <div className="hz-repnote"><Receipt size={12} />Profit = Sales − Stock − Salaries (advances included). Rent, utilities &amp; sales tax not counted.</div>
-      </div>
+        <div className="hz-card" style={{ marginTop: 14 }}>
+          <div className="hz-reptable">
+            <div className="hz-rep-head"><span>Month</span><span>Orders</span><span>Sales</span><span>Stock</span><span>Salaries</span><span>Profit</span></div>
+            {genRows.filter((r) => r.has).length === 0 && <Empty text={`No data recorded for ${year} yet.`} />}
+            {genRows.filter((r) => r.has).map((r) => (
+              <div className="hz-rep-row" key={r.m}><span className="hz-rep-mn">{r.mn}</span><span>{r.ordersN}</span><span className="hz-rep-sale">{rs(r.sales)}</span><span className="hz-rep-stock">− {rs(r.stock)}</span><span className="hz-rep-sal">− {rs(r.salary)}</span><span className={"hz-rep-prof" + (r.profit < 0 ? " neg" : "")}>{rs(r.profit)}</span></div>
+            ))}
+            {genRows.filter((r) => r.has).length > 0 && <div className="hz-rep-row tot"><span className="hz-rep-mn">{year} Total</span><span>{genTot.ordersN}</span><span className="hz-rep-sale">{rs(genTot.sales)}</span><span className="hz-rep-stock">− {rs(genTot.stock)}</span><span className="hz-rep-sal">− {rs(genTot.salary)}</span><span className={"hz-rep-prof" + (genTot.profit < 0 ? " neg" : "")}>{rs(genTot.profit)}</span></div>}
+          </div>
+        </div>
+      </>}
+
+      {/* ---- SALES ---- */}
+      {cat === "sales" && <div className="hz-card" style={{ marginTop: 4 }}>
+        <div className="hz-card-h"><h3>Sales · {periodLabel}</h3><span className="hz-card-sub">{selOrders.length} orders · {money(salesTotal)}</span></div>
+        <div className="hz-reptable">
+          <div className="hz-rep-head3"><span>Order type</span><span>Orders</span><span>Sales</span></div>
+          {salesByType.length === 0 && <Empty text="No sales in this period." />}
+          {salesByType.map((r) => <div className="hz-rep-row3" key={r.label}><span className="hz-rep-mn">{r.label}</span><span>{r.n}</span><span className="hz-rep-sale">{rs(r.sum)}</span></div>)}
+          {salesByType.length > 0 && <div className="hz-rep-row3 tot"><span className="hz-rep-mn">Total</span><span>{selOrders.length}</span><span className="hz-rep-sale">{rs(salesTotal)}</span></div>}
+        </div>
+      </div>}
+
+      {/* ---- STOCK (kya kya aaya) ---- */}
+      {cat === "stock" && <>
+        <div className="hz-card" style={{ marginTop: 4 }}>
+          <div className="hz-card-h"><h3>Stock summary · {periodLabel}</h3><span className="hz-card-sub">by item · total {money(stockTotal)}</span></div>
+          <div className="hz-reptable">
+            <div className="hz-rep-head4"><span>Item</span><span>Qty in</span><span>Buys</span><span>Cost</span></div>
+            {stockByItem.length === 0 && <Empty text="No stock purchased in this period." />}
+            {stockByItem.map((r) => <div className="hz-rep-row4" key={r.item}><span className="hz-rep-mn">{r.item}</span><span>{r.qty} {r.unit}</span><span>{r.n}</span><span className="hz-rep-stock2">{rs(r.cost)}</span></div>)}
+            {stockByItem.length > 0 && <div className="hz-rep-row4 tot"><span className="hz-rep-mn">Total</span><span /><span>{selPurch.length}</span><span className="hz-rep-stock2">{rs(stockTotal)}</span></div>}
+          </div>
+        </div>
+        <div className="hz-card" style={{ marginTop: 14 }}>
+          <div className="hz-card-h"><h3>Every purchase · {periodLabel}</h3><span className="hz-card-sub">full list · kya kya aaya</span></div>
+          <div className="hz-buyhist">
+            {selPurch.length === 0 && <Empty text="No purchases logged in this period." />}
+            {selPurch.map((p) => <div className="hz-buyrow" key={p.id}><span className="hz-tq"><Boxes size={11} />{p.qty} {p.unit}</span><span className="hz-buyitem">{p.item}{branch === "all" && <BranchTag b={p.branch} />}</span><span className="hz-buycost">{rs(p.cost)}</span><span className="hz-buydate">{dateShort(p.date)}{p.by ? ` · ${p.by}` : ""}</span></div>)}
+          </div>
+        </div>
+      </>}
+
+      {/* ---- SALARIES ---- */}
+      {cat === "salaries" && <div className="hz-card" style={{ marginTop: 4 }}>
+        <div className="hz-card-h"><h3>Salaries paid · {periodLabel}</h3><span className="hz-card-sub">paid {money(salTot.paid)} · advances {money(salTot.adv)}</span></div>
+        <div className="hz-reptable">
+          <div className="hz-rep-head5"><span>Staff</span><span>Role</span><span>Salary/mo</span><span>Paid</span><span>Advance</span></div>
+          {salRows.length === 0 && <Empty text="No salaries paid in this period." />}
+          {salRows.map((r) => <div className="hz-rep-row5" key={r.name}><span className="hz-rep-mn">{r.name}{branch === "all" && r.branch !== "all" && <BranchTag b={r.branch} />}</span><span className="hz-rep-role">{r.role}</span><span>{rs(r.salary)}</span><span className="hz-rep-sale">{rs(r.paid)}</span><span className="hz-rep-sal2">{rs(r.adv)}</span></div>)}
+          {salRows.length > 0 && <div className="hz-rep-row5 tot"><span className="hz-rep-mn">Total</span><span /><span /><span className="hz-rep-sale">{rs(salTot.paid)}</span><span className="hz-rep-sal2">{rs(salTot.adv)}</span></div>}
+        </div>
+      </div>}
+
+      <div className="hz-repnote"><Receipt size={12} />General profit = Sales − Stock − Salaries (advances included). Rent, utilities &amp; sales tax not counted.</div>
     </>
   );
 }
+
 /* ----------------------------- Inventory -------------------------- */
 function Inventory({ ctx, branch, isAdmin }) {
   const inB = (x) => branch === "all" || x.branch === branch;
@@ -2568,6 +2663,13 @@ function Payroll({ ctx, isAdmin, myBranch, branch }) {
             const monthsToNow = monthsBetween(u.joined || now());
             const paidCount = monthsToNow.filter((m) => paid.has(m)).length;
             const owed = monthsToNow.filter((m) => !paid.has(m)).length * (u.salary || 0);
+            /* Advances taken THIS month are money already handed to the employee,
+               so the salary still to give them this month is reduced by that.
+               net = (this month's salary) − (advances taken this month),
+               never below zero. */
+            const advThisMonthU = (u.advances || []).filter((a) => isThisMonth(a.date)).reduce((x, a) => x + a.amount, 0);
+            const paidThisMonthU = curKey && paid.has(curKey);
+            const netPayable = paidThisMonthU ? 0 : Math.max(0, (u.salary || 0) - advThisMonthU);
             return (
               <div className="hz-payrow" key={u.id}>
                 <div className="hz-payrow-top">
@@ -2589,6 +2691,16 @@ function Payroll({ ctx, isAdmin, myBranch, branch }) {
                 </div>
 
                 {u.advances?.length > 0 && <div className="hz-advlist"><span className="hz-advlbl">Advances:</span>{u.advances.map((a) => <span key={a.id} className="hz-advchip"><Banknote size={11} />{rs(a.amount)}{a.note ? ` · ${a.note}` : ""}</span>)}</div>}
+
+                {/* What's actually left to hand over this month, after advances. */}
+                {(u.salary > 0) && <div className={"hz-netpay" + (paidThisMonthU ? " done" : "")}>
+                  {paidThisMonthU
+                    ? <><Check size={13} /><span>{monthShort(curKey)} salary paid in full</span></>
+                    : <>
+                        <Wallet size={13} />
+                        <span>To pay this month: <b>{rs(u.salary)}</b>{advThisMonthU > 0 && <> − advance <b>{rs(advThisMonthU)}</b></>} = <b className="net">{rs(netPayable)}</b></span>
+                      </>}
+                </div>}
 
                 {isEdit ? (
                   <div className="hz-payedit">
@@ -3310,6 +3422,29 @@ const CSS = `
 .hz-hbranch.closed{opacity:.72;}
 .hz-branchstatus{display:flex;align-items:center;gap:14px;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:12px 15px;margin-bottom:14px;}
 /* Reports table */
+.hz-repcats{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;}
+.hz-repcat{display:inline-flex;align-items:center;gap:7px;padding:9px 15px;border-radius:10px;font-size:13px;font-weight:700;color:var(--muted);background:var(--surface2);border:1px solid var(--border);cursor:pointer;transition:.15s;}
+.hz-repcat svg{opacity:.8;}
+.hz-repcat.on{color:#0c0a08;background:linear-gradient(135deg,var(--ember),var(--saffron));border-color:transparent;}
+.hz-repcat.on svg{opacity:1;}
+.hz-repfilter{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px;}
+.hz-repfilt-g{display:flex;flex-direction:column;gap:5px;}
+.hz-repfilt-g>span{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:700;}
+.hz-repmonth{padding:9px 12px;border-radius:9px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:13px;font-weight:600;font-family:var(--fb);cursor:pointer;min-width:150px;}
+.hz-rep-head3,.hz-rep-row3{display:grid;grid-template-columns:2fr 1fr 1.4fr;gap:8px;align-items:center;padding:11px 8px;}
+.hz-rep-head4,.hz-rep-row4{display:grid;grid-template-columns:2fr 1.1fr .7fr 1.2fr;gap:8px;align-items:center;padding:11px 8px;}
+.hz-rep-head5,.hz-rep-row5{display:grid;grid-template-columns:1.6fr 1fr 1fr 1fr 1fr;gap:8px;align-items:center;padding:11px 8px;}
+.hz-rep-head3,.hz-rep-head4,.hz-rep-head5{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:700;border-bottom:1px solid var(--border);}
+.hz-rep-head3 span:not(:first-child),.hz-rep-row3 span:not(.hz-rep-mn),.hz-rep-head4 span:not(:first-child),.hz-rep-row4 span:not(.hz-rep-mn),.hz-rep-head5 span:not(:first-child),.hz-rep-row5 span:not(.hz-rep-mn){text-align:right;font-variant-numeric:tabular-nums;}
+.hz-rep-row3,.hz-rep-row4,.hz-rep-row5{border-bottom:1px solid var(--border);font-size:12.5px;color:var(--text);}
+.hz-rep-row3.tot,.hz-rep-row4.tot,.hz-rep-row5.tot{border-top:2px solid var(--text);border-bottom:none;font-weight:800;margin-top:2px;}
+.hz-rep-stock2{color:#FF8A5C;font-weight:700;font-family:var(--fm);}
+.hz-rep-sal2{color:#FFB22C;font-weight:700;font-family:var(--fm);}
+.hz-rep-role{color:var(--muted);font-size:11.5px;}
+@media (max-width:640px){
+  .hz-rep-head3,.hz-rep-head4,.hz-rep-head5{display:none;}
+  .hz-rep-row3,.hz-rep-row4,.hz-rep-row5{grid-template-columns:1fr 1fr;gap:4px 8px;padding:10px;background:var(--bg2);border-radius:10px;margin-bottom:8px;border:1px solid var(--border);}
+}
 .hz-reptable{display:flex;flex-direction:column;}
 .hz-rep-head,.hz-rep-row{display:grid;grid-template-columns:1.3fr .7fr 1fr 1fr 1fr 1fr;gap:8px;align-items:center;padding:10px 8px;}
 .hz-rep-head{font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:700;border-bottom:1px solid var(--border);}
@@ -3514,6 +3649,12 @@ const CSS = `
 .hz-pay-num b.adv{color:var(--saffron);}.hz-pay-num b.rem{color:var(--jade);}
 .hz-advlist{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;}
 .hz-advchip{display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:600;color:var(--muted);background:var(--surface2);border:1px solid var(--border);padding:3px 9px;border-radius:99px;}
+.hz-netpay{display:flex;align-items:center;gap:7px;margin-top:8px;padding:8px 11px;border-radius:9px;background:color-mix(in srgb,var(--saffron) 9%,transparent);border:1px solid color-mix(in srgb,var(--saffron) 25%,var(--border));font-size:12px;color:var(--muted);}
+.hz-netpay svg{color:var(--saffron);flex-shrink:0;}
+.hz-netpay b{color:var(--text);font-weight:700;}
+.hz-netpay b.net{color:var(--saffron);font-size:13px;}
+.hz-netpay.done{background:color-mix(in srgb,var(--jade) 9%,transparent);border-color:color-mix(in srgb,var(--jade) 25%,var(--border));}
+.hz-netpay.done svg{color:var(--jade);}
 .hz-payacts{display:flex;gap:8px;margin-top:11px;}
 .hz-paybtn2{display:inline-flex;align-items:center;gap:6px;padding:8px 13px;border-radius:9px;font-size:12px;font-weight:700;background:var(--surface2);border:1px solid var(--border);color:var(--text);transition:.15s;}
 .hz-paybtn2:hover{border-color:var(--ember);}
