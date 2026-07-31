@@ -54,11 +54,11 @@ const restoreMenuImages = (menu, seed) => (menu || []).map((m) => {
 const rs = (n) => "Rs " + n.toLocaleString("en-PK");
 const now = () => Date.now();
 
-/* A short, pleasant, distinctive notification chime — a rising three-note
-   arpeggio (like a little "ta-da") played through the Web Audio API so it needs
-   no sound file and works offline. Kept quiet and quick so it's noticeable but
-   never annoying across a busy shift. Browsers only allow audio after the user
-   has interacted with the page, so the first tap/click unlocks it. */
+/* A distinctive, alerting notification sound — a two-phase "ding-ding-dong"
+   that's long enough to catch attention across a busy floor but still musical,
+   not harsh. Played through the Web Audio API so it needs no sound file and
+   works offline. Browsers only allow audio after the user interacts with the
+   page, so the first tap/login unlocks it. */
 let _audioCtx = null;
 const unlockAudio = () => { try { if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)(); if (_audioCtx.state === "suspended") _audioCtx.resume(); } catch (_) {} };
 const playChime = () => {
@@ -66,16 +66,25 @@ const playChime = () => {
     if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const ctx = _audioCtx; if (ctx.state === "suspended") ctx.resume();
     const t0 = ctx.currentTime;
-    const notes = [880, 1174.66, 1567.98];   // A5 · D6 · G6 — bright, friendly rise
-    const master = ctx.createGain(); master.gain.value = 0.14; master.connect(ctx.destination);
-    notes.forEach((f, i) => {
-      const t = t0 + i * 0.11;
-      const osc = ctx.createOscillator(); osc.type = "sine"; osc.frequency.value = f;
+    const master = ctx.createGain(); master.gain.value = 0.16; master.connect(ctx.destination);
+    // A short rising "ding-ding" then a settled "dong" — repeated once so it
+    // reads clearly as an alert. Times are in seconds from now.
+    const seq = [
+      { f: 987.77, t: 0.00, d: 0.18 },   // B5
+      { f: 1318.51, t: 0.16, d: 0.22 },  // E6
+      { f: 1046.50, t: 0.42, d: 0.34 },  // C6  (settle)
+      { f: 987.77, t: 0.86, d: 0.18 },   // B5  (second ring)
+      { f: 1318.51, t: 1.02, d: 0.22 },  // E6
+      { f: 1046.50, t: 1.28, d: 0.40 },  // C6  (final settle, longer)
+    ];
+    seq.forEach(({ f, t, d }) => {
+      const at = t0 + t;
+      const osc = ctx.createOscillator(); osc.type = "triangle"; osc.frequency.value = f;
       const g = ctx.createGain();
-      g.gain.setValueAtTime(0, t);
-      g.gain.linearRampToValueAtTime(1, t + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.001, t + 0.32);
-      osc.connect(g); g.connect(master); osc.start(t); osc.stop(t + 0.34);
+      g.gain.setValueAtTime(0, at);
+      g.gain.linearRampToValueAtTime(1, at + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, at + d);
+      osc.connect(g); g.connect(master); osc.start(at); osc.stop(at + d + 0.02);
     });
   } catch (_) {}
 };
@@ -660,10 +669,16 @@ export default function App() {
   const markReady = (id) => {
     const o = orders.find((x) => x.id === id); if (!o) return;
     flash(id);
-    if (FIREBASE_READY) updateOrderDoc(id, { status: "ready" });
-    else setOrders((prev) => prev.map((x) => x.id === id ? { ...x, status: "ready" } : x));
     if (o.status === "ready" || o.status === "completed") return;
     const del = o.type === "delivery";
+    // Tell the customer their food is ready (shown on their live tracking page).
+    const custMsg = del
+      ? "Your order is ready and will be picked up for delivery shortly."
+      : o.type === "carhop" ? "Your order is ready — it's being brought to your car."
+      : o.type === "takeaway" ? "Your order is ready for pickup at the counter."
+      : "Your order is ready and will be served shortly.";
+    if (FIREBASE_READY) updateOrderDoc(id, { status: "ready", custMsg });
+    else setOrders((prev) => prev.map((x) => x.id === id ? { ...x, status: "ready", custMsg } : x));
     const what = del ? "pick up for delivery" : o.type === "carhop" ? `take to car ${o.vehicle || ""}` : o.type === "takeaway" ? "hand over at counter" : `serve to table ${o.table || ""}`;
     pushNotif({ roles: [del ? "rider" : "waiter"], name: o.waiter, branch: o.branch }, `🔔 ${o.waiter}: Order #${o.q} ready — ${what}`, del ? "#9B8CFF" : "#29D3A6");
   };
@@ -1568,6 +1583,15 @@ function Track({ o, ctx, onNew }) {
   // Keeps the local "was this order still active?" cache accurate as status
   // changes live, so a later refresh knows correctly whether to resume it.
   useEffect(() => { updateMyOrderStatus(o.id, o.status); }, [o.id, o.status]);
+  /* Chime for the customer when their status message changes — e.g. the kitchen
+     marks the order ready, or the rider says they've arrived. The first render
+     is skipped so an already-in-progress order doesn't beep on page load. */
+  const lastMsg = useRef(o.custMsg || "");
+  const firstMsg = useRef(true);
+  useEffect(() => {
+    if (firstMsg.current) { firstMsg.current = false; lastMsg.current = o.custMsg || ""; return; }
+    if ((o.custMsg || "") && o.custMsg !== lastMsg.current) { lastMsg.current = o.custMsg; playChime(); }
+  }, [o.custMsg]);
   /* The generic STAGE labels ("Ready", "Completed") don't tell a customer
      what actually happens next — this makes the timeline say what THEY
      should expect for how their specific order type leaves the kitchen. */
@@ -1772,7 +1796,7 @@ function OrderCheckout({ ctx, mode, branch, table, spotPrefill, items, sum, onBa
         address: delivery ? address.trim() : undefined, payment: payStatus,
         items: items.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) };
     }
-    setErr(""); setPlacing(true);
+    setErr(""); setPlacing(true); unlockAudio();
     ctx.addOrder(partial)
       .then((o) => onPlaced(o))
       .catch((e) => { console.error("Place order failed", e); setPlacing(false); setErr("Couldn't place the order — please check your connection and try again."); });
@@ -2098,7 +2122,7 @@ function ManagerOps({ ctx, branch, onPrint }) {
   const all = ctx.orders.filter(inB).filter((o) => {
     if (oqx) return String(o.q).includes(oqx) || (o.customer || "").toLowerCase().includes(oqx) || (o.phone || "").includes(oqx);
     return (dayFilter === "today" && ACTIVE(o.status)) || dayTest(o.createdAt);
-  }).sort((a, b) => (dayStart(b.createdAt) - dayStart(a.createdAt)) || (b.priority - a.priority) || (a.createdAt - b.createdAt));
+  }).sort((a, b) => (dayStart(b.createdAt) - dayStart(a.createdAt)) || (b.priority - a.priority) || (b.createdAt - a.createdAt));
   const active = all.filter((o) => ACTIVE(o.status));
   const revenue = all.reduce((a, b) => a + grand(b), 0);
   const branches = branch === "all" ? BRANCHES.map((b) => b.id) : [branch];
