@@ -62,6 +62,9 @@ const now = () => Date.now();
 let _audioCtx = null;
 const unlockAudio = () => { try { if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)(); if (_audioCtx.state === "suspended") _audioCtx.resume(); } catch (_) {} };
 const playChime = () => {
+  // Also buzz the phone (where supported) so an alert is felt even if the
+  // screen's audio is muted or the phone is in a pocket. Harmless on desktop.
+  try { if (navigator.vibrate) navigator.vibrate([180, 90, 180]); } catch (_) {}
   try {
     if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const ctx = _audioCtx; if (ctx.state === "suspended") ctx.resume();
@@ -445,6 +448,18 @@ export default function App() {
   const [online, setOnline] = useState(!FIREBASE_READY); // "synced" once first Firestore read lands
 
   useEffect(() => { const t = setInterval(() => setTick((x) => x + 1), 1000); return () => clearInterval(t); }, []);
+  /* Browsers block audio until the user interacts with the page. Unlock the
+     notification chime on the very first tap/click/scroll/keypress — this is
+     what lets a customer on their phone actually HEAR the "order ready" alert,
+     since just opening the page isn't enough for mobile browsers. */
+  useEffect(() => {
+    const arm = () => { unlockAudio(); };
+    const opts = { once: true, passive: true };
+    window.addEventListener("pointerdown", arm, opts);
+    window.addEventListener("touchstart", arm, opts);
+    window.addEventListener("keydown", arm, opts);
+    return () => { window.removeEventListener("pointerdown", arm); window.removeEventListener("touchstart", arm); window.removeEventListener("keydown", arm); };
+  }, []);
 
   /* ================================================================
      CROSS-DEVICE SYNC (Firebase Firestore)
@@ -1588,10 +1603,28 @@ function Track({ o, ctx, onNew }) {
      is skipped so an already-in-progress order doesn't beep on page load. */
   const lastMsg = useRef(o.custMsg || "");
   const firstMsg = useRef(true);
+  const lastStatus = useRef(o.status);
   useEffect(() => {
-    if (firstMsg.current) { firstMsg.current = false; lastMsg.current = o.custMsg || ""; return; }
+    if (firstMsg.current) { firstMsg.current = false; lastMsg.current = o.custMsg || ""; lastStatus.current = o.status; return; }
     if ((o.custMsg || "") && o.custMsg !== lastMsg.current) { lastMsg.current = o.custMsg; playChime(); }
+    lastStatus.current = o.status;
   }, [o.custMsg]);
+  /* On mobile the browser pauses the page when it's backgrounded (screen off /
+     switched apps), so a chime that fires while it's asleep is missed. We track
+     the last status the customer actually SAW (page visible). When they return,
+     if the order moved on while they were away, we alert them then. */
+  const seenStatus = useRef(o.status);
+  useEffect(() => {
+    // While the page is visible, keep "seen" in step with the live status.
+    if (document.visibilityState === "visible") seenStatus.current = o.status;
+    const onVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      unlockAudio();
+      if (o.status !== seenStatus.current) { seenStatus.current = o.status; playChime(); }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [o.status]);
   /* The generic STAGE labels ("Ready", "Completed") don't tell a customer
      what actually happens next — this makes the timeline say what THEY
      should expect for how their specific order type leaves the kitchen. */
