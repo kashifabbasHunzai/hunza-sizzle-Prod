@@ -773,9 +773,16 @@ export default function App() {
     // Record the full current total as covered, so if more items are added later
     // we again only ask for the new difference.
     const covered = total(o) + (o.fee || 0) + (o.tax || 0);
-    const patch = { payProof: proof, payment: "pending", paidAmount: covered, custMsg: "Payment screenshot received — thank you! We'll confirm it shortly." };
+    /* Keep EVERY screenshot the customer sends, not just the latest. A customer
+       may pay in two parts (e.g. the order, then a balance after an item was
+       added), and staff need to see all the proofs to verify the full amount.
+       We append to payProofs[]; payProof (single) is kept as the most recent for
+       older code paths and any pre-existing orders. */
+    const prev = Array.isArray(o.payProofs) ? o.payProofs : (o.payProof ? [o.payProof] : []);
+    const payProofs = [...prev, { img: proof, at: now(), amount: o.paidAmount != null ? Math.max(0, covered - o.paidAmount) : covered }];
+    const patch = { payProofs, payProof: proof, payment: "pending", paidAmount: covered, custMsg: "Payment screenshot received — thank you! We'll confirm it shortly." };
     if (FIREBASE_READY) updateOrderDoc(id, patch);
-    else setOrders((prev) => prev.map((x) => x.id === id ? { ...x, ...patch } : x));
+    else setOrders((prev2) => prev2.map((x) => x.id === id ? { ...x, ...patch } : x));
     pushNotif({ roles: ["admin", "manager", "cashier"], branch: o.branch }, `💳 Payment screenshot received for #${o.q} — verify`, "#5A9CFF");
     toast("Payment screenshot sent — thank you!", "#29D3A6");
   };
@@ -1973,7 +1980,8 @@ function OrderCheckout({ ctx, mode, branch, table, spotPrefill, items, sum, onBa
        every other order type, online payment still needs a screenshot up-front. */
     const deferPay = delivery && pay === "card";
     if (pay === "card" && !deferPay && !proof) { setErr("Please attach a screenshot of your payment to confirm the order."); return; }
-    const money = { fee, tax, taxRate: tRate, payMethod: pay, payProof: (pay === "card" && !deferPay) ? proof : undefined };
+    const upProof = (pay === "card" && !deferPay) ? proof : undefined;
+    const money = { fee, tax, taxRate: tRate, payMethod: pay, payProof: upProof, payProofs: upProof ? [{ img: upProof, at: now(), amount: payable }] : undefined };
     let partial;
     // Online/card payment isn't actually verified here (no payment gateway is
     // wired up) — it only means "customer claims to have paid online", so it
@@ -2208,19 +2216,29 @@ function DashCard({ icon: Icon, label, val, sub, c, big }) {
    confusing "delivered" message before the rider actually picked it up. */
 /* Shows the customer's payment screenshot on a staff order card. A thumbnail
    that opens full-size when tapped, so admin/manager can verify the transfer. */
-function ProofView({ src, q }) {
-  const [big, setBig] = useState(false);
+function ProofView({ o, q }) {
+  const [big, setBig] = useState(null);   // index of the screenshot open in the lightbox
+  /* Gather every payment screenshot for this order. New orders store them in
+     payProofs[] (with time + amount); older orders had a single payProof. */
+  const proofs = Array.isArray(o.payProofs) && o.payProofs.length
+    ? o.payProofs
+    : (o.payProof ? [{ img: o.payProof }] : []);
+  if (!proofs.length) return null;
   return (
     <>
-      <button className="hz-proofthumb" onClick={() => setBig(true)}>
-        <img src={src} alt={`Payment proof for order #${q}`} />
-        <span><Receipt size={11} />Payment screenshot — tap to view</span>
-      </button>
-      {big && (
-        <div className="hz-prooflightbox" onClick={() => setBig(false)}>
+      <div className="hz-prooflist">
+        {proofs.map((p, i) => (
+          <button className="hz-proofthumb" key={i} onClick={() => setBig(i)}>
+            <img src={p.img} alt={`Payment proof ${i + 1} for order #${q}`} />
+            <span><Receipt size={11} />{proofs.length > 1 ? `Screenshot ${i + 1} of ${proofs.length}` : "Payment screenshot"}{p.amount ? ` · ${rs(p.amount)}` : ""} — tap to view</span>
+          </button>
+        ))}
+      </div>
+      {big != null && proofs[big] && (
+        <div className="hz-prooflightbox" onClick={() => setBig(null)}>
           <div className="hz-prooflb-inner" onClick={(e) => e.stopPropagation()}>
-            <div className="hz-prooflb-h"><b>Payment proof · Order #{q}</b><button onClick={() => setBig(false)}><X size={16} /></button></div>
-            <img src={src} alt={`Payment proof for order #${q}`} />
+            <div className="hz-prooflb-h"><b>Payment proof · Order #{q}{proofs.length > 1 ? ` (${big + 1}/${proofs.length})` : ""}</b><button onClick={() => setBig(null)}><X size={16} /></button></div>
+            <img src={proofs[big].img} alt={`Payment proof for order #${q}`} />
           </div>
         </div>
       )}
@@ -2404,7 +2422,7 @@ function ManagerOps({ ctx, branch, onPrint }) {
               <div className="hz-mhead"><span className="hz-tq"><Hash size={12} />{o.q}</span><Badge s={o.status} sm /><BranchTag b={o.branch} />{ACTIVE(o.status) && <span className="hz-qpos">Q#{ctx.queue[o.id]}</span>}{(o.source === "qr" || o.source === "online" || o.source === "car") && <span className="hz-srctag">{o.source}</span>}<span className={"hz-pay " + o.payment}>{o.payment === "paid" ? "Paid" : o.payment === "pending" ? "Verify payment" : o.payment === "awaiting" ? "Awaiting payment" : "Unpaid"}</span></div>
               <div className="hz-mmeta"><span><T.icon size={12} />{T.label}</span><span><User size={12} />{o.customer}</span><span>{del ? <Bike size={12} /> : <Users size={12} />}{o.waiter}</span><span><Clock size={12} />{clock(o.createdAt)}</span></div>
               <div className="hz-mitems">{o.items.map((i) => `${i.qty}× ${i.name}`).join(" · ")}</div>
-              {o.payProof && <ProofView src={o.payProof} q={o.q} />}
+              {(o.payProof || (o.payProofs && o.payProofs.length > 0)) && <ProofView o={o} q={o.q} />}
               <div className="hz-mfoot"><b>{rs(grand(o))}</b>{ACTIVE(o.status) && <span className="hz-eta">ETA {etaMins(o)}m</span>}
                 <div className="hz-macts">
                   <button className="hz-printbtn" onClick={() => doPrint(o)}><Receipt size={13} />{o.status === "new" ? "Print" : "Re-print"}</button>
@@ -4078,6 +4096,7 @@ const CSS = `
 .hz-syncing b{font-size:14px;color:var(--text);}
 .hz-syncing span{font-size:12px;color:var(--muted);}
 @keyframes hzspin{to{transform:rotate(360deg);}}
+.hz-prooflist{display:flex;flex-direction:column;gap:2px;}
 .hz-proofthumb{display:flex;align-items:center;gap:9px;width:100%;margin:8px 0 2px;padding:7px;border:1px solid var(--border);border-radius:10px;background:var(--surface2);cursor:pointer;text-align:left;}
 .hz-proofthumb:hover{border-color:var(--ember);}
 .hz-proofthumb img{width:40px;height:40px;object-fit:cover;border-radius:7px;flex-shrink:0;}
