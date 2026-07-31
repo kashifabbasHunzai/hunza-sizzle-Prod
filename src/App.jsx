@@ -526,7 +526,13 @@ export default function App() {
   useEffect(() => {
     if (!FIREBASE_READY) return;
     const unsubOrders = onSnapshot(collection(db, "orders"), (snap) => {
-      setOrders(snap.docs.map((d) => d.data()));
+      const list = snap.docs.map((d) => d.data());
+      setOrders(list);
+      /* Keep the local counter at least as high as the biggest order number we
+         can see, so if the atomic transaction ever falls back to a local count
+         it still can't hand out a number that's already in use. */
+      const maxQ = list.reduce((m, o) => Math.max(m, o.q || 0), 0);
+      if (maxQ > qref.current) qref.current = maxQ;
     }, (e) => { console.error("Firestore orders listen failed", e); });
     /* Staff/users get the same one-document-per-record treatment as orders —
        they used to live as one array inside the shared "meta" doc, which
@@ -769,7 +775,13 @@ export default function App() {
       q = ++qref.current;
     }
 
-    const o = { id: "o" + q, q, status: "new", payment: partial.payment || "unpaid",
+    /* The order NUMBER (q) is the human-facing sequence from the atomic counter.
+       The document ID must be globally unique on its own — never just "o"+q —
+       otherwise a new order could reuse a seed order's id ("o1") or, if two
+       devices ever raced, overwrite each other. So we build the id from the
+       number plus a timestamp and random suffix. */
+    const uid = "o" + q + "-" + now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const o = { id: uid, q, status: "new", payment: partial.payment || "unpaid",
       priority: false, createdAt: now(), notes: "", ...partial, waiter };
     /* Orders taken by a waiter at the counter don't pass fee/tax, so work them
        out here. This keeps sales tax consistent no matter how the order arrived. */
@@ -1810,11 +1822,30 @@ function OrderCheckout({ ctx, mode, branch, table, spotPrefill, items, sum, onBa
   const tRate = taxRate(branch, pay);
   const tax = taxOf(branch, pay, sum + fee);
   const payable = sum + fee + tax;
+  /* Shrink the payment screenshot before it's stored on the order. Phone
+     screenshots are 1–5 MB of base64 — big enough to make the Firestore write
+     slow or fail (which left the order showing on the customer's phone but never
+     reaching admin). We redraw it at max 900px wide as JPEG ~0.7 (~60–120 KB),
+     which stays readable for verifying a transaction but saves reliably. */
   const onProof = (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
+    if (f.size > 12 * 1024 * 1024) { setErr("Screenshot under 12MB please."); return; }
     const r = new FileReader();
-    r.onload = () => setProof(r.result);
+    r.onload = () => {
+      const im = new Image();
+      im.onload = () => {
+        const max = 900;
+        let { width: w, height: h } = im;
+        if (w > max) { h = Math.round(h * max / w); w = max; }
+        const c = document.createElement("canvas"); c.width = w; c.height = h;
+        c.getContext("2d").drawImage(im, 0, 0, w, h);
+        let out; try { out = c.toDataURL("image/jpeg", 0.7); } catch (_) { out = r.result; }
+        setProof(out); setErr("");
+      };
+      im.onerror = () => setProof(r.result);
+      im.src = r.result;
+    };
     r.readAsDataURL(f);
   };
   const place = () => {
