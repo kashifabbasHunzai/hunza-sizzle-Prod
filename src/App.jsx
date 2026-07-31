@@ -734,10 +734,26 @@ export default function App() {
     const f = Math.max(0, Math.round(+fee || 0));
     const sub = total(o);
     const tax = taxOf(o.branch, o.payMethod || "cod", sub + f);
-    const custMsg = f > 0 ? `Delivery charges of ${rs(f)} have been added based on your location. New total: ${rs(sub + f + tax)}.` : "Delivery is free for your location.";
+    const newTotal = sub + f + tax;
+    // If the customer chose to pay online but we deferred it (delivery fee wasn't
+    // known yet), now that the fee is set they can pay — tell them so, which also
+    // reveals the "Pay now" step on their tracking page.
+    const awaiting = o.payment === "awaiting";
+    const custMsg = awaiting
+      ? `Delivery fee of ${rs(f)} added. Your total is ${rs(newTotal)} — tap "Pay now" to pay and attach your screenshot.`
+      : f > 0 ? `Delivery charges of ${rs(f)} have been added based on your location. New total: ${rs(newTotal)}.` : "Delivery is free for your location.";
     if (FIREBASE_READY) updateOrderDoc(id, { fee: f, tax, custMsg });
     else setOrders((prev) => prev.map((x) => x.id === id ? { ...x, fee: f, tax, custMsg } : x));
     toast(`Delivery fee set · ${rs(f)} for #${o.q}`, "#9B8CFF");
+  };
+  /* Customer pays online after the fee is set: attaches their screenshot and the
+     order moves from "awaiting" to "pending" (staff still verify the money). */
+  const attachPayment = (id, proof) => {
+    const o = orders.find((x) => x.id === id); if (!o) return;
+    if (FIREBASE_READY) updateOrderDoc(id, { payProof: proof, payment: "pending", custMsg: "Payment screenshot received — thank you! We'll confirm it shortly." });
+    else setOrders((prev) => prev.map((x) => x.id === id ? { ...x, payProof: proof, payment: "pending", custMsg: "Payment screenshot received — thank you! We'll confirm it shortly." } : x));
+    pushNotif({ roles: ["admin", "manager", "cashier"], branch: o.branch }, `💳 Payment screenshot received for #${o.q} — verify`, "#5A9CFF");
+    toast("Payment screenshot sent — thank you!", "#29D3A6");
   };
   const setPaid = (id) => {
     if (FIREBASE_READY) updateOrderDoc(id, { payment: "paid" });
@@ -928,7 +944,7 @@ export default function App() {
   }, [orders]);
 
   const ctx = { orders, queue, users, inventory, requests, menu, branchWaiters, lightestWaiter, branchRiders, lightestRider, activeCount, myName: session ? session.name : "Staff",
-    setStatus, markServed, markPreparing, markReady, riderStep, notifs, cancel, togglePriority, setDeliveryFee, setPaid, setUnpaid, addOrder, addItemsToOrder, addUser, toggleUser, deleteUser,
+    setStatus, markServed, markPreparing, markReady, riderStep, notifs, cancel, togglePriority, setDeliveryFee, attachPayment, setPaid, setUnpaid, addOrder, addItemsToOrder, addUser, toggleUser, deleteUser,
     setSalary, addAdvance, paySalary, unpaySalary, addStock, restock, buyStock, purchases, addRequest, fulfillRequest, rejectRequest,
     addMenuItem, toggleMenuItem, toggleMenuBranch, deleteMenuItem, updateMenuItem, updateUser, updateInventory, deleteInventory, branchOpen, toggleBranch,
     pulse: pulse.current, auto, setAuto, toast };
@@ -1235,10 +1251,19 @@ const dateShort = (ts) => { if (!ts) return ""; const d = new Date(ts); return d
    person: matching role, and (when set) matching name and branch. */
 function NotifBell({ notifs, session }) {
   const [open, setOpen] = useState(false);
-  const [seen, setSeen] = useState(now());
+  /* Remember when this person last opened their bell, persisted per-user so a
+     page refresh doesn't wrongly mark every existing notification as "seen"
+     (which was hiding the unread count). New notifications since that time
+     count as unread and show the red number badge. */
+  const seenKey = "hz_notif_seen_" + (session.userId || session.name || session.role);
+  const [seen, setSeen] = useState(() => {
+    try { const v = +localStorage.getItem(seenKey); return v > 0 ? v : 0; } catch (_) { return 0; }
+  });
+  const markSeen = () => { const t = now(); setSeen(t); try { localStorage.setItem(seenKey, String(t)); } catch (_) {} };
   const mine = (notifs || []).filter((n) => n.roles?.includes(session.role)
     && (n.name ? n.name === session.name : true)
-    && (n.branch ? (n.branch === "all" || session.branch === "all" || n.branch === session.branch) : true));
+    && (n.branch ? (n.branch === "all" || session.branch === "all" || n.branch === session.branch) : true))
+    .sort((a, b) => b.time - a.time);
   const unread = mine.filter((n) => n.time > seen).length;
   /* Ring the chime whenever a brand-new notification lands for this person.
      We track the most recent notification id we've already sounded so a re-render
@@ -1249,22 +1274,22 @@ function NotifBell({ notifs, session }) {
   useEffect(() => {
     const newest = mine[0];
     if (firstRun.current) { firstRun.current = false; lastSounded.current = newest?.id || null; return; }
-    if (newest && newest.id !== lastSounded.current && newest.time > seen) {
+    if (newest && newest.id !== lastSounded.current) {
       lastSounded.current = newest.id;
       playChime();
     }
   }, [mine.length ? mine[0].id : null]);
   return (
     <div className="hz-bellwrap">
-      <button className={"hz-icbtn" + (unread ? " hasnew" : "")} onClick={() => { unlockAudio(); setOpen((v) => !v); if (!open) setSeen(now()); }}>
-        <Bell size={16} />{unread > 0 && <span className="hz-belldot">{unread}</span>}
+      <button className={"hz-icbtn" + (unread ? " hasnew" : "")} onClick={() => { unlockAudio(); setOpen((v) => !v); if (!open) markSeen(); }}>
+        <Bell size={16} />{unread > 0 && <span className="hz-belldot">{unread > 9 ? "9+" : unread}</span>}
       </button>
       {open && (
         <div className="hz-bellpanel">
           <div className="hz-bellpanel-h"><b>Notifications</b><button onClick={() => setOpen(false)}><X size={14} /></button></div>
           {mine.length === 0 && <div className="hz-bellempty">No notifications yet.</div>}
-          {mine.slice(0, 20).map((n) => (
-            <div className="hz-bellrow" key={n.id}><span className="hz-belldotc" style={{ background: n.color || "var(--ember)" }} /><div><div className="hz-bellmsg">{n.msg.replace(/^🔔\s*/, "")}</div><div className="hz-belltime">{ago(n.time)}</div></div></div>
+          {mine.slice(0, 25).map((n) => (
+            <div className={"hz-bellrow" + (n.time > seen ? " unread" : "")} key={n.id}><span className="hz-belldotc" style={{ background: n.color || "var(--ember)" }} /><div><div className="hz-bellmsg">{n.msg.replace(/^🔔\s*/, "")}</div><div className="hz-belltime">{ago(n.time)}</div></div></div>
           ))}
         </div>
       )}
@@ -1453,7 +1478,7 @@ function Rider({ ctx, me, branch }) {
               <div className="hz-deliverto"><Home size={14} /><span>Deliver to</span><b>{o.customer}</b></div>
               <div className="hz-rideraddr"><MapPin size={13} />{o.address || "—"}{o.phone && <a className="hz-ridercall" href={`tel:${o.phone}`}><Phone size={12} />{o.phone}</a>}</div>
               <div className="hz-witems">{o.items.map((i) => `${i.qty}× ${i.name}`).join(" · ")}{o.notes && <em> · “{o.notes}”</em>}</div>
-              <div className="hz-mfoot" style={{ marginBottom: 10 }}><b>{rs(grand(o))}</b><span className={"hz-pay " + o.payment}>{o.payment === "paid" ? "Prepaid" : o.payment === "pending" ? "Paid online (unverified)" : "Collect cash"}</span></div>
+              <div className="hz-mfoot" style={{ marginBottom: 10 }}><b>{rs(grand(o))}</b><span className={"hz-pay " + o.payment}>{o.payment === "paid" ? "Prepaid" : o.payment === "pending" ? "Paid online (unverified)" : o.payment === "awaiting" ? "Awaiting payment" : "Collect cash"}</span></div>
               {!isReady ? (
                 <div className="hz-wstatusnote"><Clock size={13} />Preparing… pick up as soon as it is ready · ETA {etaMins(o)}m</div>
               ) : (
@@ -1544,7 +1569,7 @@ function Cashier({ ctx, branch }) {
     .sort((a, b) => (a.payment === "paid" ? 1 : 0) - (b.payment === "paid" ? 1 : 0) || b.createdAt - a.createdAt);
   const due = ctx.orders.filter((o) => o.branch === branch && o.payment === "unpaid" && (ACTIVE(o.status) || isToday(o.createdAt))).reduce((a, b) => a + grand(b), 0);
   const pendingCount = ctx.orders.filter((o) => o.branch === branch && o.payment === "pending" && (ACTIVE(o.status) || isToday(o.createdAt))).length;
-  const PAY_LABEL = { paid: "Paid", unpaid: "Unpaid", pending: "Pending" };
+  const PAY_LABEL = { paid: "Paid", unpaid: "Unpaid", pending: "Pending", awaiting: "Awaiting payment" };
   return (
     <div className="hz-wrap narrow">
       <Head title="Billing Counter" sub={`${branchName(branch)} · ${rs(due)} cash pending${pendingCount ? ` · ${pendingCount} online payment${pendingCount > 1 ? "s" : ""} to verify` : ""}`} />
@@ -1619,6 +1644,54 @@ function MyOrders({ ctx, onOpen, onBack }) {
   );
 }
 
+/* Shown on a customer's tracking page for a delivery order they chose to pay
+   online, once the team has set the delivery fee. Lets them pay the final amount
+   and attach their screenshot — the payment step that was deferred at checkout
+   because the fee wasn't known yet. */
+function PayNowPanel({ o, ctx }) {
+  const [open, setOpen] = useState(false);
+  const [proof, setProof] = useState("");
+  const [busy, setBusy] = useState(false);
+  const onProof = (e) => {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    if (f.size > 12 * 1024 * 1024) return;
+    const r = new FileReader();
+    r.onload = () => {
+      const im = new Image();
+      im.onload = () => {
+        const max = 900; let { width: w, height: h } = im;
+        if (w > max) { h = Math.round(h * max / w); w = max; }
+        const c = document.createElement("canvas"); c.width = w; c.height = h;
+        c.getContext("2d").drawImage(im, 0, 0, w, h);
+        let out; try { out = c.toDataURL("image/jpeg", 0.7); } catch (_) { out = r.result; }
+        setProof(out);
+      };
+      im.onerror = () => setProof(r.result);
+      im.src = r.result;
+    };
+    r.readAsDataURL(f);
+  };
+  const send = () => { if (!proof || busy) return; setBusy(true); ctx.attachPayment(o.id, proof); };
+  if (!open) return (
+    <div className="hz-paynow-open"><button className="hz-cta" onClick={() => setOpen(true)}><CreditCard size={15} />Pay now · {rs(grand(o))}</button></div>
+  );
+  return (
+    <div className="hz-payinfo hz-paynow">
+      <div className="hz-payinfo-h"><CreditCard size={14} />Pay for your order</div>
+      <div className="hz-payinfo-row"><span>Account title</span><b>{PAY_ACCOUNT.title}</b></div>
+      <div className="hz-payinfo-row"><span>Account number</span><b className="hz-acct">{PAY_ACCOUNT.number}</b></div>
+      <div className="hz-payinfo-row"><span>Send via</span><b>{PAY_ACCOUNT.banks}</b></div>
+      <div className="hz-payinfo-amt"><span>Amount to send</span><b>{rs(grand(o))}</b></div>
+      <label className="hz-payproof">
+        {proof
+          ? <div className="hz-proof-done"><img src={proof} alt="payment proof" /><span><CheckCircle2 size={13} /> Screenshot attached — tap to change</span></div>
+          : <div className="hz-proof-ph"><ImagePlus size={22} /><span>Attach payment screenshot</span></div>}
+        <input type="file" accept="image/*" onChange={onProof} hidden />
+      </label>
+      <button className="hz-cta" disabled={!proof || busy} onClick={send}>{busy ? "Sending…" : <>Confirm payment<ArrowRight size={15} /></>}</button>
+    </div>
+  );
+}
 function Track({ o, ctx, onNew }) {
   const i = STAGES.indexOf(o.status); const pos = ctx.queue[o.id];
   // Keeps the local "was this order still active?" cache accurate as status
@@ -1692,10 +1765,14 @@ function Track({ o, ctx, onNew }) {
             {o.tax > 0 && <div className="hz-track-sumrow"><span>Tax{o.taxRate ? ` (${(o.taxRate * 100).toFixed(0)}%)` : ""}</span><span>{rs(o.tax)}</span></div>}
             <div className="hz-track-sumrow total"><span>Total</span><span>{rs(grand(o))}</span></div>
           </div>
-          {o.type === "delivery" && !(o.fee > 0) && (
+          {o.type === "delivery" && !(o.fee > 0) && o.payment !== "awaiting" && (
             <div className="hz-feenote"><Truck size={13} /><span>Delivery fee is <b>not included yet</b> — it will be added based on your location, and your total will update here.</span></div>
           )}
-          <div className={"hz-pay bare " + o.payment}>{o.payment === "paid" ? "Paid" : o.payment === "pending" ? "Payment pending verification" : "Pay on " + (o.type === "delivery" ? "delivery" : "collection")}</div>
+          {o.payment === "awaiting" && !(o.fee > 0) && (
+            <div className="hz-feenote"><Truck size={13} /><span>We'll add your delivery fee based on location, then a <b>“Pay now”</b> button appears here with the final amount.</span></div>
+          )}
+          {o.payment === "awaiting" && o.fee > 0 && <PayNowPanel o={o} ctx={ctx} />}
+          <div className={"hz-pay bare " + o.payment}>{o.payment === "paid" ? "Paid" : o.payment === "pending" ? "Payment pending verification" : o.payment === "awaiting" ? "Awaiting payment" : "Pay on " + (o.type === "delivery" ? "delivery" : "collection")}</div>
         </div>
       </div>
       <button className="hz-back wide center" onClick={onNew}>+ Place another order</button>
@@ -1857,15 +1934,22 @@ function OrderCheckout({ ctx, mode, branch, table, spotPrefill, items, sum, onBa
     if ((delivery || pickup) && phone.trim().length < 7) { setErr("Please enter a valid phone number."); return; }
     if (delivery && !address.trim()) { setErr("A delivery address is required."); return; }
     if (mode === "car" && (!vehicle.trim() || !spot.trim())) { setErr("Please enter your vehicle number and parking spot."); return; }
-    if (pay === "card" && !proof) { setErr("Please attach a screenshot of your payment to confirm the order."); return; }
-    const money = { fee, tax, taxRate: tRate, payMethod: pay, payProof: pay === "card" ? proof : undefined };
+    /* For a DELIVERY order paid online, the customer must NOT pay (or upload a
+       screenshot) at checkout, because the delivery fee isn't known yet — it's
+       added later based on their location. So we take the order now with no
+       proof and mark it "awaiting payment"; once the team sets the fee, the
+       customer gets a "Pay now" step on their tracking page (see Track). For
+       every other order type, online payment still needs a screenshot up-front. */
+    const deferPay = delivery && pay === "card";
+    if (pay === "card" && !deferPay && !proof) { setErr("Please attach a screenshot of your payment to confirm the order."); return; }
+    const money = { fee, tax, taxRate: tRate, payMethod: pay, payProof: (pay === "card" && !deferPay) ? proof : undefined };
     let partial;
     // Online/card payment isn't actually verified here (no payment gateway is
     // wired up) — it only means "customer claims to have paid online", so it
     // starts as "pending" until staff confirm the money actually landed
     // (see Cashier / Manager Operations → "Verify payment"). Cash orders are
     // simply "unpaid" until collected in person, same as before.
-    const payStatus = pay === "card" ? "pending" : "unpaid";
+    const payStatus = pay === "card" ? (deferPay ? "awaiting" : "pending") : "unpaid";
     if (dine) {
       partial = { source: "qr", branch, type: "dinein", table: table || "—", customer: name.trim(), notes: notes.trim(), ...money,
         payment: payStatus, items: items.map((i) => ({ name: i.name, qty: i.qty, price: i.price })) };
@@ -1904,7 +1988,13 @@ function OrderCheckout({ ctx, mode, branch, table, spotPrefill, items, sum, onBa
           <button className={"hz-payopt" + (pay === "card" ? " on" : "")} onClick={() => setPay("card")}><CreditCard size={16} />Online Payment{branch === TAX_BRANCH && <em className="hz-taxhint save">+5% tax</em>}</button>
         </div>
         {branch === TAX_BRANCH && <div className="hz-branchnote"><Receipt size={12} />Pay by card and save {rs(taxOf(branch, "cod", sum + fee) - taxOf(branch, "card", sum + fee))}<InfoTip label="About sales tax">Sales tax at {branchName(TAX_BRANCH)} is 16% on cash payments but only 5% on card or online payments, so paying by card costs you less.</InfoTip></div>}
-        {pay === "card" && (
+        {pay === "card" && delivery && (
+          <div className="hz-payinfo">
+            <div className="hz-payinfo-h"><CreditCard size={14} />Online payment — after delivery fee</div>
+            <div className="hz-paylater"><Truck size={14} /><span>Place your order now. Once our team adds the delivery fee for your location, a <b>“Pay now”</b> button will appear on your tracking page with the final amount — you'll pay and attach the screenshot then.</span></div>
+          </div>
+        )}
+        {pay === "card" && !delivery && (
           <div className="hz-payinfo">
             <div className="hz-payinfo-h"><CreditCard size={14} />Send payment to this account</div>
             <div className="hz-payinfo-row"><span>Account title</span><b>{PAY_ACCOUNT.title}</b></div>
@@ -2280,7 +2370,7 @@ function ManagerOps({ ctx, branch, onPrint }) {
               <div className="hz-daysep"><Calendar size={12} />{g.label}<span className="hz-daysep-n">{g.items.length} order{g.items.length > 1 ? "s" : ""}</span></div>
               <div className="hz-stack">{g.items.map((o) => { const T = typeMeta(o); const del = o.type === "delivery"; return (
             <div className={"hz-mrow" + (flashing(ctx, o.id) ? " flash" : "") + (o.status === "new" ? " isnew" : "")} key={o.id}>
-              <div className="hz-mhead"><span className="hz-tq"><Hash size={12} />{o.q}</span><Badge s={o.status} sm /><BranchTag b={o.branch} />{ACTIVE(o.status) && <span className="hz-qpos">Q#{ctx.queue[o.id]}</span>}{(o.source === "qr" || o.source === "online" || o.source === "car") && <span className="hz-srctag">{o.source}</span>}<span className={"hz-pay " + o.payment}>{o.payment === "paid" ? "Paid" : o.payment === "pending" ? "Verify payment" : "Unpaid"}</span></div>
+              <div className="hz-mhead"><span className="hz-tq"><Hash size={12} />{o.q}</span><Badge s={o.status} sm /><BranchTag b={o.branch} />{ACTIVE(o.status) && <span className="hz-qpos">Q#{ctx.queue[o.id]}</span>}{(o.source === "qr" || o.source === "online" || o.source === "car") && <span className="hz-srctag">{o.source}</span>}<span className={"hz-pay " + o.payment}>{o.payment === "paid" ? "Paid" : o.payment === "pending" ? "Verify payment" : o.payment === "awaiting" ? "Awaiting payment" : "Unpaid"}</span></div>
               <div className="hz-mmeta"><span><T.icon size={12} />{T.label}</span><span><User size={12} />{o.customer}</span><span>{del ? <Bike size={12} /> : <Users size={12} />}{o.waiter}</span><span><Clock size={12} />{clock(o.createdAt)}</span></div>
               <div className="hz-mitems">{o.items.map((i) => `${i.qty}× ${i.name}`).join(" · ")}</div>
               {o.payProof && <ProofView src={o.payProof} q={o.q} />}
@@ -3277,6 +3367,7 @@ const CSS = `
 .hz-bellpanel-h button{color:var(--muted);}
 .hz-bellempty{padding:20px;text-align:center;color:var(--muted);font-size:12.5px;}
 .hz-bellrow{display:flex;gap:9px;padding:9px 10px;border-radius:9px;}
+.hz-bellrow.unread{background:color-mix(in srgb,var(--ember) 8%,transparent);}
 .hz-bellrow:hover{background:var(--surface2);}
 .hz-belldotc{width:8px;height:8px;border-radius:50%;margin-top:5px;flex-shrink:0;}
 .hz-bellmsg{font-size:12.5px;line-height:1.35;}
@@ -3553,6 +3644,7 @@ const CSS = `
 .hz-pay.paid{color:var(--jade);background:color-mix(in srgb,var(--jade) 14%,transparent);}
 .hz-pay.unpaid{color:var(--saffron);background:color-mix(in srgb,var(--saffron) 14%,transparent);}
 .hz-pay.pending{color:#9B8CFF;background:color-mix(in srgb,#9B8CFF 16%,transparent);}
+.hz-pay.awaiting{color:#E8A33D;background:color-mix(in srgb,#E8A33D 16%,transparent);}
 .hz-mmeta{display:flex;flex-wrap:wrap;gap:9px;font-size:11.5px;color:var(--muted);margin-bottom:7px;}
 .hz-mmeta span{display:inline-flex;align-items:center;gap:4px;}
 .hz-mitems{font-size:12.5px;margin-bottom:7px;}
@@ -3693,6 +3785,12 @@ const CSS = `
 }
 .hz-daychips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;}
 .hz-feenote{display:flex;align-items:flex-start;gap:8px;margin-top:10px;padding:10px 12px;border-radius:10px;background:color-mix(in srgb,#9B8CFF 10%,transparent);border:1px solid color-mix(in srgb,#9B8CFF 26%,var(--border));font-size:12px;color:var(--muted);line-height:1.45;}
+.hz-paylater{display:flex;align-items:flex-start;gap:8px;padding:10px 12px;border-radius:10px;background:color-mix(in srgb,#9B8CFF 10%,transparent);font-size:12px;color:var(--muted);line-height:1.45;}
+.hz-paylater svg{color:#9B8CFF;flex-shrink:0;margin-top:1px;}
+.hz-paylater b{color:var(--text);font-weight:700;}
+.hz-paynow{margin-top:12px;}
+.hz-paynow-open{margin-top:12px;}
+.hz-paynow-open .hz-cta{width:100%;}
 .hz-feenote svg{color:#9B8CFF;flex-shrink:0;margin-top:1px;}
 .hz-feenote b{color:var(--text);font-weight:700;}
 .hz-feebar-h{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700;color:var(--text);margin-bottom:9px;}
