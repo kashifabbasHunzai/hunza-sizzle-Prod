@@ -719,6 +719,20 @@ export default function App() {
     if (FIREBASE_READY) updateOrderDoc(id, { priority: !o.priority });
     else setOrders((prev) => prev.map((x) => x.id === id ? { ...x, priority: !x.priority } : x));
   };
+  /* Admin/manager sets the delivery fee once they know the customer's distance.
+     The fee flows into the bill's subtotal→total, any location-based sales tax
+     is recomputed on (items + fee), and the customer is told on their tracking
+     page so it appears on their account too. */
+  const setDeliveryFee = (id, fee) => {
+    const o = orders.find((x) => x.id === id); if (!o) return;
+    const f = Math.max(0, Math.round(+fee || 0));
+    const sub = total(o);
+    const tax = taxOf(o.branch, o.payMethod || "cod", sub + f);
+    const custMsg = f > 0 ? `Delivery charges of ${rs(f)} have been added based on your location. New total: ${rs(sub + f + tax)}.` : "Delivery is free for your location.";
+    if (FIREBASE_READY) updateOrderDoc(id, { fee: f, tax, custMsg });
+    else setOrders((prev) => prev.map((x) => x.id === id ? { ...x, fee: f, tax, custMsg } : x));
+    toast(`Delivery fee set · ${rs(f)} for #${o.q}`, "#9B8CFF");
+  };
   const setPaid = (id) => {
     if (FIREBASE_READY) updateOrderDoc(id, { payment: "paid" });
     else setOrders((prev) => prev.map((o) => o.id === id ? { ...o, payment: "paid" } : o));
@@ -902,7 +916,7 @@ export default function App() {
   }, [orders]);
 
   const ctx = { orders, queue, users, inventory, requests, menu, branchWaiters, lightestWaiter, branchRiders, lightestRider, activeCount, myName: session ? session.name : "Staff",
-    setStatus, markServed, markPreparing, markReady, riderStep, notifs, cancel, togglePriority, setPaid, setUnpaid, addOrder, addItemsToOrder, addUser, toggleUser, deleteUser,
+    setStatus, markServed, markPreparing, markReady, riderStep, notifs, cancel, togglePriority, setDeliveryFee, setPaid, setUnpaid, addOrder, addItemsToOrder, addUser, toggleUser, deleteUser,
     setSalary, addAdvance, paySalary, unpaySalary, addStock, restock, buyStock, purchases, addRequest, fulfillRequest, rejectRequest,
     addMenuItem, toggleMenuItem, toggleMenuBranch, deleteMenuItem, updateMenuItem, updateUser, updateInventory, deleteInventory, branchOpen, toggleBranch,
     pulse: pulse.current, auto, setAuto, toast };
@@ -1844,7 +1858,7 @@ function OrderCheckout({ ctx, mode, branch, table, spotPrefill, items, sum, onBa
         {tax > 0 && <div><span>Sales tax ({Math.round(tRate * 100)}%)</span><b>{rs(tax)}</b></div>}
         <div className="hz-cosum-t"><span>Total</span><b>{rs(payable)}</b></div>
       </div>
-      {delivery && <div className="hz-branchnote" style={{ marginBottom: 12 }}><Truck size={13} />Delivery charges are added by the rider based on your location — they are not included here yet.</div>}
+      {delivery && <div className="hz-branchnote" style={{ marginBottom: 12 }}><Truck size={13} />Delivery charges depend on your location and are not included here. Our team will add them and confirm your final total after you order.</div>}
       <div className="hz-form">
         <label><span><User size={12} /> Name</span><input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" /></label>
         {(delivery || pickup) && <label><span><Phone size={12} /> Phone</span><input value={phone} onChange={(e) => setPhone(e.target.value.replace(/[^\d-]/g, ""))} placeholder="03xx-xxxxxxx" /></label>}
@@ -2100,6 +2114,28 @@ function StageIcons({ o, ctx }) {
 /* A collapsible "add more items" strip shown on a running order. Staff pick
    from that branch's live menu; quantities merge into the existing bill and the
    total re-totals automatically. Used on the Operations and Waiter screens. */
+/* Lets admin/manager set the location-based delivery fee on a delivery order.
+   The fee is added to the bill total and pushed to the customer's tracking. */
+function DeliveryFeeBar({ o, ctx }) {
+  const [open, setOpen] = useState(false);
+  const [val, setVal] = useState(o.fee ? String(o.fee) : "");
+  const save = () => { ctx.setDeliveryFee(o.id, +val || 0); setOpen(false); };
+  if (!open) return (
+    <div className="hz-additems-open">
+      <button className="hz-additems-btn" onClick={() => setOpen(true)}><Truck size={13} />{o.fee > 0 ? `Delivery fee: ${rs(o.fee)} — edit` : "Set delivery fee (by location)"}</button>
+    </div>
+  );
+  return (
+    <div className="hz-feebar">
+      <div className="hz-feebar-h"><Truck size={13} />Delivery fee for #{o.q}<span>added to bill &amp; sent to customer</span></div>
+      <div className="hz-feebar-row">
+        <div className="hz-costin"><em>Rs</em><input autoFocus type="text" inputMode="numeric" value={val} onChange={(e) => setVal(e.target.value.replace(/[^\d]/g, ""))} placeholder="0" /></div>
+        <button className="hz-fulfill" onClick={save}><Check size={13} />Set fee</button>
+        <button className="hz-mini" onClick={() => setOpen(false)}><X size={13} /></button>
+      </div>
+    </div>
+  );
+}
 function AddItemsBar({ o, ctx }) {
   const [open, setOpen] = useState(false);
   const [pick, setPick] = useState({});   // { menuItemId: qty }
@@ -2231,6 +2267,7 @@ function ManagerOps({ ctx, branch, onPrint }) {
               {/* Staff can keep adding items to a running order (extra drinks, etc.)
                   until it's completed. Not available to online customers. */}
               {ACTIVE(o.status) && <AddItemsBar o={o} ctx={ctx} />}
+              {o.type === "delivery" && ACTIVE(o.status) && <DeliveryFeeBar o={o} ctx={ctx} />}
             </div>); })}</div>
             </div>
           ))}
@@ -3621,6 +3658,12 @@ const CSS = `
   .hz-rep-row{grid-template-columns:1fr 1fr;gap:4px 8px;padding:10px;background:var(--bg2);border-radius:10px;margin-bottom:8px;border:1px solid var(--border);}
 }
 .hz-daychips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;}
+.hz-feebar{margin-top:8px;padding:11px;border-radius:11px;background:color-mix(in srgb,#9B8CFF 8%,var(--surface2));border:1px solid color-mix(in srgb,#9B8CFF 28%,var(--border));}
+.hz-feebar-h{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700;color:var(--text);margin-bottom:9px;}
+.hz-feebar-h svg{color:#9B8CFF;}
+.hz-feebar-h span{font-weight:500;color:var(--muted);font-size:10.5px;margin-left:auto;}
+.hz-feebar-row{display:flex;align-items:center;gap:8px;}
+.hz-feebar-row .hz-costin{flex:1;max-width:160px;}
 .hz-osearch{display:flex;align-items:center;gap:8px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:0 11px;margin-bottom:10px;}
 .hz-osearch svg{color:var(--muted);flex-shrink:0;}
 .hz-osearch input{flex:1;border:none;background:transparent;padding:10px 0;color:var(--text);font-size:13px;outline:none;box-shadow:none!important;}
