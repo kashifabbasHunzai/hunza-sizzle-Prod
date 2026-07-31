@@ -25,7 +25,12 @@ const sanitize = (obj) => JSON.parse(JSON.stringify(obj));
    So before writing, we strip any heavy base64 image out of each menu item
    (keeping a small photoUrl link if the user supplied one). The built-in seed
    photos are re-attached from SEED_MENU on read, so the app still shows them. */
-const isHeavyImg = (v) => typeof v === "string" && v.startsWith("data:") && v.length > 500;
+/* A menu photo is only "too heavy" to store if it's a big inline base64 blob.
+   Small compressed thumbnails (produced on upload, ~10–25 KB) are fine to keep
+   in the database, so the user's own dish photos survive a refresh. We only
+   strip genuinely large data-URLs (> ~60 KB), which are the un-compressed
+   full-size originals that would blow past Firestore's 1 MB document limit. */
+const isHeavyImg = (v) => typeof v === "string" && v.startsWith("data:") && v.length > 60000;
 const stripMenuImages = (menu) => (menu || []).map((m) => {
   const out = { ...m };
   if (isHeavyImg(out.img)) delete out.img;      // don't persist inline base64
@@ -2442,7 +2447,33 @@ function MenuManager({ ctx }) {
   const [name, setName] = useState(""); const [price, setPrice] = useState(""); const [cat, setCat] = useState("");
   const [desc, setDesc] = useState(""); const [img, setImg] = useState(""); const [brs, setBrs] = useState(["g91", "i8"]); const [err, setErr] = useState("");
   const cats = [...new Set(ctx.menu.map((m) => m.cat))];
-  const onFile = (e) => { const f = e.target.files?.[0]; if (!f) return; if (f.size > 1.5 * 1024 * 1024) { setErr("Photo under 1.5MB please."); return; } const r = new FileReader(); r.onload = () => setImg(r.result); r.readAsDataURL(f); };
+  /* Shrink an uploaded photo to a small thumbnail before storing it. Full-size
+     phone photos are 1–5 MB of base64 — far too big to keep in the shared menu
+     document (Firestore caps a doc at 1 MB). We draw the image onto a canvas at
+     max 320px and re-encode as JPEG ~0.7, which yields ~10–20 KB. That's small
+     enough to save in the database, so the picture now survives a refresh
+     instead of being dropped. */
+  const onFile = (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    if (f.size > 8 * 1024 * 1024) { setErr("Photo under 8MB please."); return; }
+    const r = new FileReader();
+    r.onload = () => {
+      const im = new Image();
+      im.onload = () => {
+        const max = 320;
+        let { width: w, height: h } = im;
+        if (w > h && w > max) { h = Math.round(h * max / w); w = max; }
+        else if (h > max) { w = Math.round(w * max / h); h = max; }
+        const c = document.createElement("canvas"); c.width = w; c.height = h;
+        c.getContext("2d").drawImage(im, 0, 0, w, h);
+        let out; try { out = c.toDataURL("image/jpeg", 0.7); } catch (_) { out = r.result; }
+        setImg(out); setErr("");
+      };
+      im.onerror = () => { setImg(r.result); };
+      im.src = r.result;
+    };
+    r.readAsDataURL(f);
+  };
   const toggleBr = (b) => setBrs((p) => p.includes(b) ? (p.length > 1 ? p.filter((x) => x !== b) : p) : [...p, b]);
   const create = () => { if (!name.trim() || !(+price > 0) || !cat.trim()) { setErr("Name, valid price, and category are required."); return; } ctx.addMenuItem({ name: name.trim(), price: +price, cat: cat.trim(), desc: desc.trim(), img: img || "", branches: brs }); setName(""); setPrice(""); setDesc(""); setImg(""); setBrs(["g91", "i8"]); setErr(""); };
   return (
