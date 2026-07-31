@@ -3322,7 +3322,7 @@ function PrintModal({ order: o, onClose }) {
         <div className="hz-receipt bill">
           <div className="hz-rc-tag alt">CUSTOMER COPY</div>
           <div className="hz-rc-title big">De-Hunza Sizzle</div>
-          <div className="hz-rc-sub">{branchName(o.branch)} · {BRANCHES.find((b) => b.id === o.branch)?.addr}</div>
+          <div className="hz-rc-sub">{BRANCHES.find((b) => b.id === o.branch)?.addr}</div>
           <div className="hz-rc-sub">Sales Receipt</div>
           <div className="hz-rc-hr" />
           <div className="hz-rc-row"><span>Order</span><b>#{o.q}</b></div>
@@ -3883,7 +3883,7 @@ const CSS = `
 .hz-toasts{position:fixed;bottom:18px;right:18px;z-index:60;display:flex;flex-direction:column;gap:9px;max-width:330px;}
 .hz-toast{position:relative;overflow:hidden;display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:12px;font-size:12.5px;font-weight:600;background:var(--surface);border:1px solid var(--border);box-shadow:0 18px 44px -16px rgba(0,0,0,.5);animation:sl .3s ease-out;}
 .hz-toast-ic{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;flex-shrink:0;}
-.hz-toast::after{content:"";position:absolute;left:0;bottom:0;height:2px;width:100%;background:linear-gradient(90deg,var(--ember),var(--saffron));transform-origin:left;animation:toastbar 3.6s linear forwards;}
+.hz-toast::after{content:"";position:absolute;left:0;bottom:0;height:2px;width:100%;background:linear-gradient(90deg,var(--ember),var(--saffron));transform-origin:left;animation:toastbar 8s linear forwards;}
 @keyframes sl{from{transform:translateX(40px);opacity:0;}to{transform:none;opacity:1;}}
 @keyframes toastbar{from{transform:scaleX(1);}to{transform:scaleX(0);}}
 
