@@ -616,7 +616,7 @@ export default function App() {
   const toast = (msg, color) => {
     const id = Math.random().toString(36).slice(2);
     setToasts((t) => [...t, { id, msg, color }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3600);
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 8000);
   };
   const flash = (id) => { pulse.current[id] = now(); };
 
@@ -3406,11 +3406,12 @@ const CSS = `
 .hz-ctl.on{color:#fff;background:linear-gradient(135deg,var(--ember),var(--saffron));border-color:transparent;}
 .hz-synctag{display:inline-flex;align-items:center;gap:5px;padding:6px 10px;border-radius:10px;font-size:11px;font-weight:700;background:var(--surface);border:1px solid var(--border);color:var(--danger,#FF5470);}
 .hz-synctag.on{color:#29D3A6;border-color:#29D3A633;background:#29D3A61a;}
-.hz-icbtn{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;background:var(--surface);border:1px solid var(--border);color:var(--text);transition:transform .14s,border-color .15s;}
+.hz-icbtn{position:relative;width:36px;height:36px;border-radius:10px;display:grid;place-items:center;background:var(--surface);border:1px solid var(--border);color:var(--text);transition:transform .14s,border-color .15s;}
 .hz-icbtn:active{transform:scale(.9);}
 .hz-bellwrap{position:relative;}
 .hz-icbtn.hasnew{border-color:var(--ember);color:var(--ember);}
-.hz-belldot{position:absolute;top:-5px;right:-5px;min-width:16px;height:16px;padding:0 4px;border-radius:99px;background:var(--rose);color:#fff;font-size:9.5px;font-weight:700;display:grid;place-items:center;}
+.hz-belldot{position:absolute;top:-6px;right:-6px;min-width:17px;height:17px;padding:0 4px;border-radius:99px;background:var(--rose);color:#fff;font-size:10px;font-weight:800;display:grid;place-items:center;box-shadow:0 0 0 2px var(--bg);animation:hz-bellpop 1.8s ease-in-out infinite;}
+@keyframes hz-bellpop{0%,100%{transform:scale(1);}50%{transform:scale(1.14);}}
 .hz-bellpanel{position:absolute;top:44px;right:0;z-index:40;width:290px;max-height:380px;overflow-y:auto;background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:0 20px 50px -18px rgba(0,0,0,.6);padding:6px;}
 .hz-bellpanel-h{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;font-size:13px;}
 .hz-bellpanel-h button{color:var(--muted);}
