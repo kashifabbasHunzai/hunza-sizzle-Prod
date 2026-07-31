@@ -53,6 +53,32 @@ const restoreMenuImages = (menu, seed) => (menu || []).map((m) => {
 
 const rs = (n) => "Rs " + n.toLocaleString("en-PK");
 const now = () => Date.now();
+
+/* A short, pleasant, distinctive notification chime — a rising three-note
+   arpeggio (like a little "ta-da") played through the Web Audio API so it needs
+   no sound file and works offline. Kept quiet and quick so it's noticeable but
+   never annoying across a busy shift. Browsers only allow audio after the user
+   has interacted with the page, so the first tap/click unlocks it. */
+let _audioCtx = null;
+const unlockAudio = () => { try { if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)(); if (_audioCtx.state === "suspended") _audioCtx.resume(); } catch (_) {} };
+const playChime = () => {
+  try {
+    if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = _audioCtx; if (ctx.state === "suspended") ctx.resume();
+    const t0 = ctx.currentTime;
+    const notes = [880, 1174.66, 1567.98];   // A5 · D6 · G6 — bright, friendly rise
+    const master = ctx.createGain(); master.gain.value = 0.14; master.connect(ctx.destination);
+    notes.forEach((f, i) => {
+      const t = t0 + i * 0.11;
+      const osc = ctx.createOscillator(); osc.type = "sine"; osc.frequency.value = f;
+      const g = ctx.createGain();
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(1, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.32);
+      osc.connect(g); g.connect(master); osc.start(t); osc.stop(t + 0.34);
+    });
+  } catch (_) {}
+};
 const clock = (ms) => new Date(ms).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 const MN = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const monthKey = (d) => { const x = new Date(d); return x.getFullYear() + "-" + String(x.getMonth() + 1).padStart(2, "0"); };
@@ -731,6 +757,9 @@ export default function App() {
     const proofNote = o.payMethod === "card" ? " · online payment — verify" : "";
     pushNotif({ roles: ["admin", "manager"], branch: partial.branch },
       `🧾 New ${kindLabel} order #${q} (${where})${proofNote}`, "#FF6B2C");
+    // Cashier at the branch should know a new order needs payment handling.
+    pushNotif({ roles: ["cashier"], branch: partial.branch },
+      `💳 New order #${q} — ${kindLabel} (${where})${proofNote}`, "#5A9CFF");
     if (waiter) pushNotif({ roles: [isDel ? "rider" : "waiter"], name: waiter, branch: partial.branch },
       `🔔 New order #${q} assigned to you — ${kindLabel} (${where})`, isDel ? "#9B8CFF" : "#29D3A6");
     return o;
@@ -1078,6 +1107,7 @@ function Login({ onLogin, dark, setDark, users, onHome, onOrder }) {
     }
     if (NO_LOGIN_ROLES.includes(f.role)) { setErr("Kitchen staff accounts are payroll-only (no login)."); return; }
     setTries(0);
+    unlockAudio();
     onLogin({ role: f.role, name: f.name, userId: f.id, branch: f.branch });
   };
   return (
@@ -1154,9 +1184,23 @@ function NotifBell({ notifs, session }) {
     && (n.name ? n.name === session.name : true)
     && (n.branch ? (n.branch === "all" || session.branch === "all" || n.branch === session.branch) : true));
   const unread = mine.filter((n) => n.time > seen).length;
+  /* Ring the chime whenever a brand-new notification lands for this person.
+     We track the most recent notification id we've already sounded so a re-render
+     (or the list re-loading from Firestore) doesn't replay the sound. The very
+     first render is skipped so old notifications don't all chime on login. */
+  const lastSounded = useRef(null);
+  const firstRun = useRef(true);
+  useEffect(() => {
+    const newest = mine[0];
+    if (firstRun.current) { firstRun.current = false; lastSounded.current = newest?.id || null; return; }
+    if (newest && newest.id !== lastSounded.current && newest.time > seen) {
+      lastSounded.current = newest.id;
+      playChime();
+    }
+  }, [mine.length ? mine[0].id : null]);
   return (
     <div className="hz-bellwrap">
-      <button className={"hz-icbtn" + (unread ? " hasnew" : "")} onClick={() => { setOpen((v) => !v); if (!open) setSeen(now()); }}>
+      <button className={"hz-icbtn" + (unread ? " hasnew" : "")} onClick={() => { unlockAudio(); setOpen((v) => !v); if (!open) setSeen(now()); }}>
         <Bell size={16} />{unread > 0 && <span className="hz-belldot">{unread}</span>}
       </button>
       {open && (
