@@ -1692,6 +1692,9 @@ function Track({ o, ctx, onNew }) {
             {o.tax > 0 && <div className="hz-track-sumrow"><span>Tax{o.taxRate ? ` (${(o.taxRate * 100).toFixed(0)}%)` : ""}</span><span>{rs(o.tax)}</span></div>}
             <div className="hz-track-sumrow total"><span>Total</span><span>{rs(grand(o))}</span></div>
           </div>
+          {o.type === "delivery" && !(o.fee > 0) && (
+            <div className="hz-feenote"><Truck size={13} /><span>Delivery fee is <b>not included yet</b> — it will be added based on your location, and your total will update here.</span></div>
+          )}
           <div className={"hz-pay bare " + o.payment}>{o.payment === "paid" ? "Paid" : o.payment === "pending" ? "Payment pending verification" : "Pay on " + (o.type === "delivery" ? "delivery" : "collection")}</div>
         </div>
       </div>
@@ -3689,7 +3692,9 @@ const CSS = `
   .hz-rep-row{grid-template-columns:1fr 1fr;gap:4px 8px;padding:10px;background:var(--bg2);border-radius:10px;margin-bottom:8px;border:1px solid var(--border);}
 }
 .hz-daychips{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;}
-.hz-feebar{margin-top:8px;padding:11px;border-radius:11px;background:color-mix(in srgb,#9B8CFF 8%,var(--surface2));border:1px solid color-mix(in srgb,#9B8CFF 28%,var(--border));}
+.hz-feenote{display:flex;align-items:flex-start;gap:8px;margin-top:10px;padding:10px 12px;border-radius:10px;background:color-mix(in srgb,#9B8CFF 10%,transparent);border:1px solid color-mix(in srgb,#9B8CFF 26%,var(--border));font-size:12px;color:var(--muted);line-height:1.45;}
+.hz-feenote svg{color:#9B8CFF;flex-shrink:0;margin-top:1px;}
+.hz-feenote b{color:var(--text);font-weight:700;}
 .hz-feebar-h{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:700;color:var(--text);margin-bottom:9px;}
 .hz-feebar-h svg{color:#9B8CFF;}
 .hz-feebar-h span{font-weight:500;color:var(--muted);font-size:10.5px;margin-left:auto;}
