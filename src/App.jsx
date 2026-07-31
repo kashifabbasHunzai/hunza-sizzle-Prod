@@ -665,6 +665,20 @@ export default function App() {
     const sub = items.reduce((a, b) => a + b.price * b.qty, 0);
     const tax = taxOf(o.branch, o.payMethod || "cod", sub + (o.fee || 0));
     const patch = { items, tax };
+    /* If the customer already paid online (or their online payment is pending)
+       and staff add more items, the amount they paid no longer covers the bill.
+       We record what was already covered (paidAmount) and flip the order back to
+       "awaiting" so the customer gets a "Pay balance" step on their tracking page
+       for just the difference. Cash orders don't need this — they settle the full
+       amount in person anyway. */
+    const wasOnlinePaid = (o.payment === "paid" || o.payment === "pending") && o.payMethod === "card";
+    if (wasOnlinePaid) {
+      const alreadyCovered = o.paidAmount != null ? o.paidAmount : (total(o) + (o.fee || 0) + (o.tax || 0));
+      patch.paidAmount = alreadyCovered;
+      patch.payment = "awaiting";
+      patch.custMsg = `Items were added to your order. Please pay the balance of ${rs((sub + (o.fee || 0) + tax) - alreadyCovered)} — tap "Pay now" on your order.`;
+      pushNotif({ roles: ["admin", "manager", "cashier"], branch: o.branch }, `💳 #${o.q}: items added — customer to pay balance`, "#E8A33D");
+    }
     flash(id);
     toast(`Added to order #${o.q}`, "#29D3A6");
     if (FIREBASE_READY) updateOrderDoc(id, patch);
@@ -683,7 +697,13 @@ export default function App() {
     const n = { id, ...target, msg, color, time: now() };
     if (FIREBASE_READY) setDoc(doc(db, "notifs", id), sanitize(n)).catch((e) => console.error("Firestore notif write failed", e));
     else setNotifs((p) => [n, ...p].slice(0, 60));
-    toast(msg, color);
+    /* NOTE: we deliberately do NOT pop a toast here. A single new order fans out
+       to several role-targeted notifications (admin, manager, cashier, the
+       assigned waiter/rider). Toasting each one showed every person the whole
+       fan-out — e.g. one admin saw 4 stacked toasts for the same order. The bell
+       (which is already filtered to each viewer's role/name/branch) plus its
+       chime is the right per-person alert; toasts are reserved for feedback on
+       an action the current user themselves just took. */
   };
   /* Marking an order ready notifies whoever must act next:
      the assigned rider for deliveries, otherwise the assigned waiter. */
@@ -750,8 +770,12 @@ export default function App() {
      order moves from "awaiting" to "pending" (staff still verify the money). */
   const attachPayment = (id, proof) => {
     const o = orders.find((x) => x.id === id); if (!o) return;
-    if (FIREBASE_READY) updateOrderDoc(id, { payProof: proof, payment: "pending", custMsg: "Payment screenshot received — thank you! We'll confirm it shortly." });
-    else setOrders((prev) => prev.map((x) => x.id === id ? { ...x, payProof: proof, payment: "pending", custMsg: "Payment screenshot received — thank you! We'll confirm it shortly." } : x));
+    // Record the full current total as covered, so if more items are added later
+    // we again only ask for the new difference.
+    const covered = total(o) + (o.fee || 0) + (o.tax || 0);
+    const patch = { payProof: proof, payment: "pending", paidAmount: covered, custMsg: "Payment screenshot received — thank you! We'll confirm it shortly." };
+    if (FIREBASE_READY) updateOrderDoc(id, patch);
+    else setOrders((prev) => prev.map((x) => x.id === id ? { ...x, ...patch } : x));
     pushNotif({ roles: ["admin", "manager", "cashier"], branch: o.branch }, `💳 Payment screenshot received for #${o.q} — verify`, "#5A9CFF");
     toast("Payment screenshot sent — thank you!", "#29D3A6");
   };
@@ -1652,6 +1676,12 @@ function PayNowPanel({ o, ctx }) {
   const [open, setOpen] = useState(false);
   const [proof, setProof] = useState("");
   const [busy, setBusy] = useState(false);
+  /* Amount the customer still owes. Normally the full total, but if they already
+     paid part (paidAmount, e.g. before staff added an item) we only ask for the
+     remaining balance. */
+  const fullTotal = grand(o);
+  const due = o.paidAmount != null ? Math.max(0, fullTotal - o.paidAmount) : fullTotal;
+  const isBalance = o.paidAmount != null && due < fullTotal;
   const onProof = (e) => {
     const f = e.target.files && e.target.files[0]; if (!f) return;
     if (f.size > 12 * 1024 * 1024) return;
@@ -1673,15 +1703,16 @@ function PayNowPanel({ o, ctx }) {
   };
   const send = () => { if (!proof || busy) return; setBusy(true); ctx.attachPayment(o.id, proof); };
   if (!open) return (
-    <div className="hz-paynow-open"><button className="hz-cta" onClick={() => setOpen(true)}><CreditCard size={15} />Pay now · {rs(grand(o))}</button></div>
+    <div className="hz-paynow-open"><button className="hz-cta" onClick={() => setOpen(true)}><CreditCard size={15} />{isBalance ? "Pay balance" : "Pay now"} · {rs(due)}</button></div>
   );
   return (
     <div className="hz-payinfo hz-paynow">
-      <div className="hz-payinfo-h"><CreditCard size={14} />Pay for your order</div>
+      <div className="hz-payinfo-h"><CreditCard size={14} />{isBalance ? "Pay the balance" : "Pay for your order"}</div>
       <div className="hz-payinfo-row"><span>Account title</span><b>{PAY_ACCOUNT.title}</b></div>
       <div className="hz-payinfo-row"><span>Account number</span><b className="hz-acct">{PAY_ACCOUNT.number}</b></div>
       <div className="hz-payinfo-row"><span>Send via</span><b>{PAY_ACCOUNT.banks}</b></div>
-      <div className="hz-payinfo-amt"><span>Amount to send</span><b>{rs(grand(o))}</b></div>
+      {isBalance && <div className="hz-payinfo-row"><span>Already paid</span><b>{rs(o.paidAmount)}</b></div>}
+      <div className="hz-payinfo-amt"><span>{isBalance ? "Balance to send" : "Amount to send"}</span><b>{rs(due)}</b></div>
       <label className="hz-payproof">
         {proof
           ? <div className="hz-proof-done"><img src={proof} alt="payment proof" /><span><CheckCircle2 size={13} /> Screenshot attached — tap to change</span></div>
@@ -1771,7 +1802,7 @@ function Track({ o, ctx, onNew }) {
           {o.payment === "awaiting" && !(o.fee > 0) && (
             <div className="hz-feenote"><Truck size={13} /><span>We'll add your delivery fee based on location, then a <b>“Pay now”</b> button appears here with the final amount.</span></div>
           )}
-          {o.payment === "awaiting" && o.fee > 0 && <PayNowPanel o={o} ctx={ctx} />}
+          {o.payment === "awaiting" && (o.fee > 0 || o.paidAmount != null) && <PayNowPanel o={o} ctx={ctx} />}
           <div className={"hz-pay bare " + o.payment}>{o.payment === "paid" ? "Paid" : o.payment === "pending" ? "Payment pending verification" : o.payment === "awaiting" ? "Awaiting payment" : "Pay on " + (o.type === "delivery" ? "delivery" : "collection")}</div>
         </div>
       </div>
