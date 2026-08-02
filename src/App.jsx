@@ -1284,35 +1284,39 @@ function NotifBell({ notifs, session }) {
   const [open, setOpen] = useState(false);
   /* Remember when this person last opened their bell, persisted per-user so a
      page refresh doesn't wrongly mark every existing notification as "seen"
-     (which was hiding the unread count). New notifications since that time
+     (which was hiding the unread count). New notifications after that time
      count as unread and show the red number badge. */
   const seenKey = "hz_notif_seen_" + (session.userId || session.name || session.role);
   const [seen, setSeen] = useState(() => {
     try { const v = +localStorage.getItem(seenKey); return v > 0 ? v : 0; } catch (_) { return 0; }
   });
   const markSeen = () => { const t = now(); setSeen(t); try { localStorage.setItem(seenKey, String(t)); } catch (_) {} };
-  const mine = (notifs || []).filter((n) => n.roles?.includes(session.role)
+  const mine = (notifs || []).filter((n) => n && n.roles && n.roles.includes(session.role)
     && (n.name ? n.name === session.name : true)
     && (n.branch ? (n.branch === "all" || session.branch === "all" || n.branch === session.branch) : true))
-    .sort((a, b) => b.time - a.time);
-  const unread = mine.filter((n) => n.time > seen).length;
-  /* Ring the chime whenever a brand-new notification lands for this person.
-     We track the most recent notification id we've already sounded so a re-render
-     (or the list re-loading from Firestore) doesn't replay the sound. The very
-     first render is skipped so old notifications don't all chime on login. */
-  const lastSounded = useRef(null);
-  const firstRun = useRef(true);
+    .sort((a, b) => (b.time || 0) - (a.time || 0));
+  const unread = mine.filter((n) => (n.time || 0) > seen).length;
+  /* Chime ONLY when a genuinely new notification arrives while the app is open —
+     never on a page refresh. We record the moment this bell mounted; any
+     notification whose time is after that moment is "new" and may chime. Notifs
+     that already existed before mount (which load from Firestore a beat after
+     the page opens) are always older than mountedAt, so a refresh never rings. */
+  const mountedAt = useRef(now());
+  const lastSoundedId = useRef(null);
   useEffect(() => {
     const newest = mine[0];
-    if (firstRun.current) { firstRun.current = false; lastSounded.current = newest?.id || null; return; }
-    if (newest && newest.id !== lastSounded.current) {
-      lastSounded.current = newest.id;
+    if (!newest) return;
+    if (newest.id === lastSoundedId.current) return;      // already handled this one
+    if ((newest.time || 0) > mountedAt.current && (newest.time || 0) > seen) {
+      lastSoundedId.current = newest.id;
       playChime();
+    } else {
+      lastSoundedId.current = newest.id;                   // seed silently (pre-existing notif)
     }
   }, [mine.length ? mine[0].id : null]);
   return (
     <div className="hz-bellwrap">
-      <button className={"hz-icbtn" + (unread ? " hasnew" : "")} onClick={() => { unlockAudio(); setOpen((v) => !v); if (!open) markSeen(); }}>
+      <button className={"hz-icbtn" + (unread ? " hasnew" : "")} onClick={() => { unlockAudio(); const willOpen = !open; setOpen(willOpen); if (willOpen) markSeen(); }} aria-label="Notifications">
         <Bell size={16} />{unread > 0 && <span className="hz-belldot">{unread > 9 ? "9+" : unread}</span>}
       </button>
       {open && (
@@ -1320,7 +1324,7 @@ function NotifBell({ notifs, session }) {
           <div className="hz-bellpanel-h"><b>Notifications</b><button onClick={() => setOpen(false)}><X size={14} /></button></div>
           {mine.length === 0 && <div className="hz-bellempty">No notifications yet.</div>}
           {mine.slice(0, 25).map((n) => (
-            <div className={"hz-bellrow" + (n.time > seen ? " unread" : "")} key={n.id}><span className="hz-belldotc" style={{ background: n.color || "var(--ember)" }} /><div><div className="hz-bellmsg">{n.msg.replace(/^🔔\s*/, "")}</div><div className="hz-belltime">{ago(n.time)}</div></div></div>
+            <div className={"hz-bellrow" + ((n.time || 0) > seen ? " unread" : "")} key={n.id}><span className="hz-belldotc" style={{ background: n.color || "var(--ember)" }} /><div><div className="hz-bellmsg">{(n.msg || "").replace(/^🔔\s*/, "")}</div><div className="hz-belltime">{ago(n.time)}</div></div></div>
           ))}
         </div>
       )}
@@ -3252,7 +3256,8 @@ function PrintModal({ order: o, onClose }) {
     win.document.open();
     win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Order #${o.q}</title><style>
       *{margin:0;padding:0;box-sizing:border-box;}
-      html,body{background:#fff;}
+      @page{size:80mm auto portrait;margin:0;}
+      html,body{background:#fff;width:80mm;}
       body{font-family:"Arial Black","Helvetica Neue",Arial,sans-serif;color:#000;}
       .hz-receipts{display:block;}
       .hz-receipt{width:72mm;max-width:72mm;margin:0 auto;padding:2mm 2mm 3mm;font-size:12.5px;line-height:1.42;font-weight:700;color:#000;}
@@ -3278,7 +3283,11 @@ function PrintModal({ order: o, onClose }) {
       try {
         const heightMm = Math.ceil((win.document.body.scrollHeight / 96) * 25.4) + 4;
         const st = win.document.createElement("style");
-        st.textContent = `@page{size:80mm ${heightMm}mm;margin:0;}`;
+        // Force PORTRAIT and a fixed 80mm width. Some Windows POS/desktop drivers,
+        // when their default paper is A4/Letter, will otherwise lay the narrow
+        // receipt out sideways (landscape) on another PC. Stating the orientation
+        // and an explicit small page size makes the intent unambiguous.
+        st.textContent = `@page{size:80mm ${heightMm}mm portrait;margin:0;}@media print{html,body{width:80mm;}}`;
         win.document.head.appendChild(st);
       } catch (e) { console.error("Couldn't size print page", e); }
       win.focus(); win.print();
