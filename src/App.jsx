@@ -3294,7 +3294,10 @@ function PrintModal({ order: o, onClose }) {
       ${w === "kitchen" ? ".hz-receipt.bill{display:none;}" : w === "bill" ? ".hz-receipt.kitchen{display:none;}" : pageBreak}
     </style></head><body>${receiptsEl.outerHTML}</body></html>`);
     win.document.close();
+    let printed = false;                       // guard so we never print/size twice
     const runPrint = () => {
+      if (printed) return;
+      printed = true;
       try {
         const heightMm = Math.ceil((win.document.body.scrollHeight / 96) * 25.4) + 4;
         const st = win.document.createElement("style");
@@ -3305,11 +3308,19 @@ function PrintModal({ order: o, onClose }) {
         st.textContent = `@page{size:80mm ${heightMm}mm portrait;margin:0;}@media print{html,body{width:80mm;}}`;
         win.document.head.appendChild(st);
       } catch (e) { console.error("Couldn't size print page", e); }
-      win.focus(); win.print();
+      try { win.focus(); win.print(); } catch (e) { console.error("Print failed", e); }
+      // Always close the print window afterwards. If this is skipped (e.g. an
+      // error above), the leftover window can make the app feel frozen, which
+      // is the "page hangs after clicking print" symptom.
       setTimeout(() => { try { win.close(); } catch (e) {} }, 400);
     };
-    if (win.document.readyState === "complete") setTimeout(runPrint, 80);
-    else win.onload = () => setTimeout(runPrint, 80);
+    /* Don't rely on win.onload alone — after document.write()+close(), several
+       browsers finish loading before onload is even attached, so the handler
+       never fires and the print window is left hanging (freezing the app).
+       We attach onload AND set a hard fallback timer; whichever fires first
+       runs print once (the `printed` guard prevents a double run). */
+    win.onload = runPrint;
+    setTimeout(runPrint, 500);
   };
   return (
     <div className={"hz-printroot show-" + which} ref={printRootRef} onClick={onClose}>
