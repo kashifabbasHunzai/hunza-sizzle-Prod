@@ -1,0 +1,21 @@
+# De-Hunza Sizzle — Hostinger SPA routing
+# Isse /admin, /waiter, /cashier waghera URLs refresh par 404 nahi deti.
+# Ye file public_html folder me daalein (dist ki files ke saath).
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+  RewriteRule ^index\.html$ - [L]
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule . /index.html [L]
+</IfModule>
+
+# Thodi caching (optional — website tez load hogi)
+<IfModule mod_expires.c>
+  ExpiresActive On
+  ExpiresByType text/css "access plus 1 month"
+  ExpiresByType application/javascript "access plus 1 month"
+  ExpiresByType image/jpeg "access plus 1 month"
+  ExpiresByType image/png "access plus 1 month"
+</IfModule>

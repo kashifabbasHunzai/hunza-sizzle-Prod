@@ -1,0 +1,64 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /* ───────────────────────────────────────────────────────────────
+       De-Hunza Sizzle — Firestore security rules (PRODUCTION + AUTH)
+
+       The app now signs every device in ANONYMOUSLY (see src/firebase.js),
+       so we can require `request.auth != null`. This means ONLY a real,
+       running copy of the app can read/write the database — a random script
+       with just your project keys will be rejected, because it isn't signed
+       in through the app.
+
+       SETUP REQUIRED: In Firebase Console → Build → Authentication →
+       Get started → enable the "Anonymous" provider. If you forget this,
+       the app can't sign in and (with these rules) the database will look
+       empty. So: enable Anonymous auth, THEN publish these rules.
+       ─────────────────────────────────────────────────────────────── */
+
+    // Signed in through the app (anonymous is fine).
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // Reject any single document bigger than ~900 KB (Firestore hard limit 1 MiB).
+    function notTooBig() {
+      return request.resource == null
+        || request.resource.size() < 900 * 1024;
+    }
+
+    // hunza/ — order-number counter + hunza/meta (menu, inventory, purchases,
+    // stock requests, branch open/closed).
+    match /hunza/{docId} {
+      allow read:  if signedIn();
+      allow write: if signedIn() && notTooBig();
+    }
+
+    // Orders — one document per order.
+    match /orders/{orderId} {
+      allow read:  if signedIn();
+      allow create: if signedIn() && notTooBig()
+                    && request.resource.data.keys().hasAll(['q', 'items', 'branch'])
+                    && request.resource.data.items.size() > 0;
+      allow update, delete: if signedIn() && notTooBig();
+    }
+
+    // Notifications — bell alerts fanned out to staff roles.
+    match /notifs/{notifId} {
+      allow read:  if signedIn();
+      allow write: if signedIn() && notTooBig();
+    }
+
+    // Staff/users — includes PINs, most sensitive collection.
+    match /users/{userId} {
+      allow read:  if signedIn();
+      allow write: if signedIn() && notTooBig();
+    }
+
+    // Everything else denied by default.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

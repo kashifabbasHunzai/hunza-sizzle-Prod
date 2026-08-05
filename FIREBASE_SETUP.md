@@ -55,48 +55,44 @@ dein). Save karein.
 
 ---
 
-## Step 3 — Firestore Rules set karein (zaroori)
+## Step 3 — Anonymous Authentication enable karein (zaroori)
+
+App ab har device ko khamoshi se ek Firebase identity deta hai (customer/staff
+ko kuch alag se karna nahi padta) — isi ki wajah se database ko properly lock
+kar sakte hain (neeche Step 4 dekhein).
+
+Firebase console → **Build → Authentication → Get started** → **Sign-in
+method** tab → **"Anonymous"** provider dhoondein → **Enable** kar ke Save
+kar dein.
+
+> ⚠️ Ye step miss na karein — agar Anonymous auth enable nahi hai, to app
+> sign-in nahi kar payega aur (naye rules ke sath) database khaali/band jaisa
+> nazar aayega.
+
+## Step 4 — Firestore Rules set karein (zaroori)
 
 Firebase console → **Firestore Database → Rules** tab → jo likha hai
-usay poora replace kar ke ye paste karein:
+usay poora replace kar ke project root ki `firestore.rules` file ka poora
+content paste karein, phir **Publish** dabayein.
 
-```
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /hunza/{docId} {
-      allow read, write: if true;
-    }
-    match /orders/{orderId} {
-      allow read, write: if true;
-    }
-    match /notifs/{notifId} {
-      allow read, write: if true;
-    }
-    match /users/{userId} {
-      allow read, write: if true;
-    }
-  }
-}
-```
+Ye rules ab sirf "koi bhi likh sakta hai" nahi hain — inme ye cheezein hain:
+- **Sign-in zaroori** — sirf woh device likh/parh sakta hai jo app ke through
+  (Anonymous Auth se) sign in hua ho. Koi bahar ka script sirf `apiKey` dekh
+  kar seedha likh nahi sakta.
+- **Size guard** — koi bhi document ~900KB se bada nahi ho sakta (Firestore
+  ki 1MB limit se surakhit fasla), taake koi bohot badi image accidentally
+  poora quota na kha jaye.
+- **Basic validation** naye orders par (order number, items, branch zaroori
+  hain).
 
-**Publish** dabayein.
-
-> ⚠️ **Imaandaar baat:** ye rules `orders/{orderId}` collection aur
-> `hunza/{docId}` (jisme `meta` aur `counters` documents hain) tak
-> read/write khol rahe hain (poora database nahi) — lekin abhi bhi
-> **koi login/permission check nahi hai**, bilkul waise hi jaise abhi
-> app ka baaqi hissa bhi client-side hai. Yani agar koi aapki Firebase
-> project ki `apiKey` dhoond le (jo public JS file mein hoti hai), woh
-> seedha data likh sakta hai. Chhote 2-branch setup ke liye ye
-> acceptable risk hai (jaisa GO_LIVE_GUIDE.md mein already discuss
-> hai), lekin jab business barhe to **Firebase Authentication** laga
-> kar rules ko role-based banana chahiye — ye ek follow-up kaam hai,
-> abhi ke liye zaroori nahi.
+> Agar business badi ho jaye aur staff members ko alag-alag permissions
+> (jaise sirf apne branch ka data) chahiye hon, to ye rules role-based banayi
+> ja sakti hain — filhal ye setup 2-branch restaurant ke liye kaafi mehfooz
+> hai.
 
 ---
 
-## Step 4 — Local par test karein
+## Step 5 — Local par test karein
 
 ```bash
 npm install
@@ -110,7 +106,7 @@ mein ek chhota **"Live"** badge bhi dikhega jab sync connect ho jaye.
 
 ---
 
-## Step 5 — Hostinger par deploy karein
+## Step 6 — Hostinger par deploy karein
 
 Hostinger par ye ek **static site** ki tarah upload hoti hai (Vercel ki
 tarah auto-detect nahi karta, is liye build khud kar ke upload karna
