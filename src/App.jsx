@@ -8,7 +8,7 @@ import {
   ImagePlus, UtensilsCrossed, Truck, Bike, Home, Phone, CreditCard, Banknote,
   Building2, Navigation, ShoppingCart, BarChart3, TrendingUp, Boxes, Calendar, Pencil, Info, Wifi, WifiOff,
 } from "lucide-react";
-import { db, FIREBASE_READY } from "./firebase";
+import { db, FIREBASE_READY, authReady } from "./firebase";
 import { doc, collection, getDoc, getDocs, setDoc, updateDoc, deleteDoc, onSnapshot, writeBatch, runTransaction, query, orderBy, limit } from "firebase/firestore";
 
 // Firestore rejects `undefined` field values outright (throws synchronously).
@@ -186,7 +186,7 @@ const NO_LOGIN_ROLES = ["kitchen"];
 /* ⚠️ PRODUCTION SWITCH — set to false before going live on your domain.
    true  = shows the tap-to-fill demo account list on the login screen (for demos)
    false = hides it, and staff PINs stay masked everywhere                      */
-const DEMO_MODE = true;
+const DEMO_MODE = false;
 
 /* Staff can reach the sign-in screen by typing any of these paths after the
    domain, e.g. thehunzasizzle.com/admin or /waiter. Customers never see a link
@@ -497,6 +497,7 @@ export default function App() {
     if (!FIREBASE_READY) return;
     (async () => {
       try {
+        await authReady;   // ensure we're signed in (anonymously) before any write, so security rules pass
         const ordersCol = collection(db, "orders");
         const existing = await getDocs(ordersCol);
         if (existing.empty) {
