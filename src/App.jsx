@@ -526,6 +526,17 @@ export default function App() {
   // Listen for changes made on OTHER devices and apply them here.
   useEffect(() => {
     if (!FIREBASE_READY) return;
+    let cancelled = false;              // effect unmounted before sign-in finished?
+    let unsubs = [];                    // filled once listeners attach
+    /* Wait for anonymous sign-in before attaching listeners. With the
+       production security rules (which require request.auth != null), a
+       listener that attaches BEFORE sign-in completes gets its first read
+       rejected with permission-denied and then goes silent — which is why
+       the customer's tracking screen used to need a manual refresh to show
+       status changes. Awaiting authReady here means the live updates work
+       immediately, with no refresh. */
+    authReady.then(() => {
+      if (cancelled) return;
     const unsubOrders = onSnapshot(collection(db, "orders"), (snap) => {
       const list = snap.docs.map((d) => d.data());
       setOrders(list);
@@ -565,7 +576,10 @@ export default function App() {
       metaLoadedRef.current = true;   // server data is in — writes are now safe
       setOnline(true);
     }, (e) => { console.error("Firestore meta listen failed", e); });
-    return () => { unsubOrders(); unsubUsers(); unsubNotifs(); unsubMeta(); };
+      // Remember the unsubscribe handles so cleanup below can detach them.
+      unsubs = [unsubOrders, unsubUsers, unsubNotifs, unsubMeta];
+    });
+    return () => { cancelled = true; unsubs.forEach((u) => { try { u(); } catch (_) {} }); };
   }, []);
 
   // Push meta changes (menu/inventory/purchases/requests/branchOpen) up to
