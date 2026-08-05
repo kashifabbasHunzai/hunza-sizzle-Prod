@@ -4,31 +4,26 @@
    data: orders, staff, menu, inventory, stock requests, branch open/
    closed status.
 
-   HOW TO SET THIS UP (5 minutes, free):
-   1. Go to https://console.firebase.google.com → "Add project" →
-      name it e.g. "hunza-sizzle" → finish the wizard (Analytics is
-      optional, you can turn it off).
-   2. In the left sidebar: Build → Firestore Database → "Create
-      database" → start in **production mode** → pick a region close
-      to Pakistan (e.g. asia-south1 / Mumbai) → Enable.
-   3. Go to Firestore → Rules tab and paste the rules from
-      FIREBASE_SETUP.md in the project root, then Publish.
-      (Default rules block everything — the app will look empty /
-      broken until you publish those rules.)
-   4. Back in the project Overview page, click the "</>" (web) icon to
-      register a web app → give it any nickname → you do NOT need
-      Firebase Hosting → it will show you a `firebaseConfig` object.
-   5. Copy those values into the object below, replacing the
-      placeholders. Save this file, then rebuild the app
-      (`npm run build`) and re-upload to Hostinger.
+   HOW TO SET THIS UP (5 minutes, free) — see DEPLOYMENT_GUIDE:
+   1. https://console.firebase.google.com → "Add project"
+   2. Build → Firestore Database → Create database → production mode
+      → region asia-south1 (Mumbai) → Enable.
+   3. Build → Authentication → Get started → enable "Anonymous"
+      (this is what lets the security rules require request.auth != null,
+       so ONLY the app can write to your database — see below).
+   4. Firestore → Rules tab → paste rules from firestore.rules → Publish.
+   5. Project Overview → "</>" (web) icon → register web app →
+      copy the firebaseConfig values into the object below.
+   6. Save, rebuild (npm run build), re-upload / push.
 
-   These values are safe to expose in the browser/GitHub — they only
-   say "which project to talk to", not a secret password. Real
-   protection comes from the Firestore Rules in step 3.
+   These config values are safe to expose in the browser/GitHub — they
+   only say "which project to talk to", not a secret password. Real
+   protection comes from the Firestore Rules + Anonymous Auth below.
    ================================================================== */
 
 import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
+import { getAuth, signInAnonymously, onAuthStateChanged } from "firebase/auth";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBE_ltpEWJMMUYni7Tak-NQOOocLby_Nig",
@@ -46,3 +41,30 @@ export const FIREBASE_READY = firebaseConfig.apiKey !== "YOUR_API_KEY";
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app);
+export const auth = getAuth(app);
+
+/* ── Anonymous Authentication ──────────────────────────────────────
+   Every device silently gets a Firebase identity the moment the app
+   opens — the customer or staff member does NOT see or do anything
+   extra (the app keeps its own username/PIN login on top of this).
+
+   Why it matters: with this, the Firestore security rules can require
+   `request.auth != null`, which means only a real, running copy of
+   THIS app can read/write your database. Without it, anyone who found
+   your project keys could write to the database with a script.
+
+   `authReady` is a promise the app can await before its first write,
+   so writes never race ahead of sign-in. It resolves even if sign-in
+   fails, so the app still works (it just falls back to open rules).   */
+export const authReady = new Promise((resolve) => {
+  if (!FIREBASE_READY) { resolve(null); return; }
+  let settled = false;
+  const finish = (u) => { if (!settled) { settled = true; resolve(u); } };
+  onAuthStateChanged(auth, (user) => { if (user) finish(user); });
+  signInAnonymously(auth).catch((e) => {
+    console.error("Anonymous sign-in failed (app will still run):", e);
+    finish(null);
+  });
+  // Safety: never block the app more than 8s waiting on auth.
+  setTimeout(() => finish(auth.currentUser || null), 8000);
+});
