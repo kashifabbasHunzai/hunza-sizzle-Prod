@@ -558,6 +558,10 @@ export default function App() {
   const [requests, setRequests] = useState(SEED_REQUESTS);
   const [menu, setMenu] = useState(SEED_MENU);
   const [branchOpen, setBranchOpen] = useState({ g91: true, i8: true });
+  /* Once the owner runs the one-time "Go Live" reset, this becomes true and the
+     reset panel disappears for good (it's saved in the database, so it stays
+     hidden on every device and every login). */
+  const [wentLive, setWentLive] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [notifs, setNotifs] = useState([]);
   const [tick, setTick] = useState(0);
@@ -710,6 +714,7 @@ export default function App() {
         if (d.purchases) setPurchases(d.purchases);
         if (d.requests) setRequests(d.requests);
         if (d.branchOpen) setBranchOpen(d.branchOpen);
+        if (typeof d.wentLive === "boolean") setWentLive(d.wentLive);
       }
       metaLoadedRef.current = true;   // server data is in — writes are now safe
       setOnline(true);
@@ -930,7 +935,8 @@ export default function App() {
         await batch.commit();
       }
       // 4) Empty inventory / purchases / requests but KEEP the menu + version.
-      await setDoc(doc(db, "hunza", "meta"), { inventory: [], purchases: [], requests: [] }, { merge: true });
+      await setDoc(doc(db, "hunza", "meta"), { inventory: [], purchases: [], requests: [], wentLive: true }, { merge: true });
+      setWentLive(true);   // hide the reset panel from now on (persisted above)
       // 5) Reset the order-number counter back to the start.
       await setDoc(doc(db, "hunza", "counters"), { orderSeq: 100 }, { merge: true });
       qref.current = 100;
@@ -1191,7 +1197,7 @@ export default function App() {
     setStatus, markServed, markPreparing, markReady, riderStep, notifs, cancel, togglePriority, setDeliveryFee, attachPayment, setPaid, setUnpaid, addOrder, addItemsToOrder, addUser, toggleUser, deleteUser,
     setSalary, addAdvance, paySalary, unpaySalary, addStock, restock, buyStock, purchases, addRequest, fulfillRequest, rejectRequest,
     addMenuItem, toggleMenuItem, toggleMenuBranch, deleteMenuItem, updateMenuItem, updateUser, updateInventory, deleteInventory, branchOpen, toggleBranch,
-    pulse: pulse.current, auto, setAuto, toast, goLiveReset };
+    pulse: pulse.current, auto, setAuto, toast, goLiveReset, wentLive };
 
   /* Keep the address bar in step with the screen, so a staff member who opened
      /admin still sees /admin after a refresh, and customers stay on "/". */
@@ -2367,7 +2373,7 @@ function Dashboard({ ctx, branch, isAdmin }) {
 
   return (
     <>
-      {isAdmin && <GoLivePanel ctx={ctx} />}
+      {isAdmin && !ctx.wentLive && <GoLivePanel ctx={ctx} />}
       <div className="hz-branchstatus">
         <span className="hz-bs-lbl"><Building2 size={14} />Branch status<InfoTip label="About branch status">Closing a branch immediately stops customers from ordering there — it shows as “Closed” on the home page and cannot be selected at checkout.</InfoTip></span>
         {branchList.map((b) => { const open = ctx.branchOpen[b];
@@ -2667,7 +2673,7 @@ function ManagerOps({ ctx, branch, onPrint, isAdmin }) {
   const groups = []; { let last = null; for (const o of all) { const lbl = dayLabel(o.createdAt); if (lbl !== last) { groups.push({ label: lbl, items: [] }); last = lbl; } groups[groups.length - 1].items.push(o); } }
   return (
     <>
-      {isAdmin && <GoLivePanel ctx={ctx} />}
+      {isAdmin && !ctx.wentLive && <GoLivePanel ctx={ctx} />}
       <div className="hz-mkpis">
         <Kpi icon={ShoppingBag} label="Orders" val={all.length} c="#FF6B2C" />
         <Kpi icon={Clock} label="Active Now" val={active.length} c="#FFB22C" />
