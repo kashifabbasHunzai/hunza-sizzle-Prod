@@ -54,6 +54,32 @@ const restoreMenuImages = (menu, seed) => (menu || []).map((m) => {
 const rs = (n) => "Rs " + n.toLocaleString("en-PK");
 const now = () => Date.now();
 
+/* ── PIN security ────────────────────────────────────────────────
+   Staff PINs must never sit in the database as plain text, because the
+   `users` collection is readable by any signed-in client (anonymous auth
+   can't carry a role claim, so Firestore can't hide individual fields).
+   Instead we store a salted SHA-256 hash. Login hashes the typed PIN and
+   compares. Old accounts created before this (plain 4-digit `pin`) still
+   work — pinMatches() falls back to a plain compare, and the hash is
+   written the next time that user is saved/edited. */
+const PIN_SALT = "hunza-sizzle-v1::";
+async function hashPin(pin) {
+  try {
+    const data = new TextEncoder().encode(PIN_SALT + String(pin).trim());
+    const buf = await crypto.subtle.digest("SHA-256", data);
+    return "h1$" + Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch (_) {
+    return null;   // crypto unavailable (very old browser) — caller keeps plain
+  }
+}
+// True if the typed PIN matches this user (hashed pinHash preferred, plain pin as fallback).
+async function pinMatches(user, typed) {
+  const t = String(typed).trim();
+  if (user.pinHash) { const h = await hashPin(t); return h != null && h === user.pinHash; }
+  return user.pin != null && user.pin === t;   // legacy plain-text account
+}
+
+
 /* A distinctive, alerting notification sound — a two-phase "ding-ding-dong"
    that's long enough to catch attention across a busy floor but still musical,
    not harsh. Played through the Web Audio API so it needs no sound file and
@@ -477,6 +503,11 @@ const SEED_REQUESTS = [
   { id: "r1", branch: "g91", item: "Mozzarella", qty: 5, unit: "kg", note: "Running low for pizzas", by: "Kitchen G-9/1", status: "pending", createdAt: now() - 6 * 60000 },
 ];
 
+/* IDs of the built-in demo staff. The "Go Live" reset deletes exactly these
+   (leaving any real staff the owner has since added — e.g. the real admin —
+   untouched, because those get fresh random IDs). */
+const SEED_USER_IDS = SEED_USERS.map((u) => u.id);
+
 /* ==================================================================
    APP ROOT — holds all shared state (orders, staff, menu, inventory,
    purchases, notifications) and passes it down through a single `ctx`
@@ -861,6 +892,56 @@ export default function App() {
     if (FIREBASE_READY) deleteDoc(doc(db, "orders", id)).catch((e) => console.error("Firestore order delete failed", e));
     else setOrders((prev) => prev.filter((o) => o.id !== id));
   };
+  /* ===== GO LIVE — wipe all demo/test data and start from zero =====
+     Deletes every order, clears inventory / purchases / requests, and removes
+     the built-in demo staff (real staff added by the owner keep their random
+     IDs and survive). The MENU is kept as-is. Returns a short result string. */
+  const goLiveReset = async () => {
+    if (!FIREBASE_READY) { toast("Not connected to database", "#FF5470"); return; }
+    try {
+      await authReady;
+      // 1) Delete every order document, in batches (Firestore limit 500/batch).
+      const ordSnap = await getDocs(collection(db, "orders"));
+      const ordIds = ordSnap.docs.map((d) => d.id);
+      for (let i = 0; i < ordIds.length; i += 400) {
+        const batch = writeBatch(db);
+        ordIds.slice(i, i + 400).forEach((oid) => batch.delete(doc(db, "orders", oid)));
+        await batch.commit();
+      }
+      // 2) Remove built-in demo staff only — but NEVER an admin. The owner
+      //    edited the seed admin (id "u1") into their real login instead of
+      //    adding a fresh one, so its id is still in SEED_USER_IDS. Excluding
+      //    every admin here means the owner can never lock themselves out.
+      const usrSnap = await getDocs(collection(db, "users"));
+      const toDelete = usrSnap.docs
+        .filter((d) => SEED_USER_IDS.includes(d.id) && (d.data() || {}).role !== "admin")
+        .map((d) => d.id);
+      for (let i = 0; i < toDelete.length; i += 400) {
+        const batch = writeBatch(db);
+        toDelete.slice(i, i + 400).forEach((uid) => batch.delete(doc(db, "users", uid)));
+        await batch.commit();
+      }
+      // 3) Clear notifications.
+      const ntSnap = await getDocs(collection(db, "notifs"));
+      const ntIds = ntSnap.docs.map((d) => d.id);
+      for (let i = 0; i < ntIds.length; i += 400) {
+        const batch = writeBatch(db);
+        ntIds.slice(i, i + 400).forEach((nid) => batch.delete(doc(db, "notifs", nid)));
+        await batch.commit();
+      }
+      // 4) Empty inventory / purchases / requests but KEEP the menu + version.
+      await setDoc(doc(db, "hunza", "meta"), { inventory: [], purchases: [], requests: [] }, { merge: true });
+      // 5) Reset the order-number counter back to the start.
+      await setDoc(doc(db, "hunza", "counters"), { orderSeq: 100 }, { merge: true });
+      qref.current = 100;
+      toast("✅ System reset — you are now live. Data starts from zero.", "#29D3A6");
+      return `Deleted ${ordIds.length} orders, ${toDelete.length} demo staff, ${ntIds.length} notifications. Inventory, purchases & requests cleared. Menu kept.`;
+    } catch (e) {
+      console.error("Go-live reset failed", e);
+      toast("Reset failed — check connection and try again", "#FF5470");
+      return "Reset failed: " + (e?.message || e);
+    }
+  };
   const togglePriority = (id) => {
     const o = orders.find((x) => x.id === id); if (!o) return;
     if (FIREBASE_READY) updateOrderDoc(id, { priority: !o.priority });
@@ -991,8 +1072,13 @@ export default function App() {
 
   const updateUserDoc = (id, patch) => { if (FIREBASE_READY) updateDoc(doc(db, "users", id), sanitize(patch)).catch((e) => console.error("Firestore user update failed", e)); };
 
-  const addUser = (u) => {
+  const addUser = async (u) => {
     const nu = { id: nextId(users, "u"), active: true, salary: u.salary || 0, advances: [], joined: now(), payments: [], ...u };
+    // Store a hash, never the raw PIN. (Kitchen/no-login roles keep their placeholder.)
+    if (nu.pin && !NO_LOGIN_ROLES.includes(nu.role)) {
+      const h = await hashPin(nu.pin);
+      if (h) { nu.pinHash = h; delete nu.pin; }
+    }
     if (FIREBASE_READY) setDoc(doc(db, "users", nu.id), sanitize(nu)).catch((e) => console.error("Firestore user create failed", e));
     else setUsers((p) => [...p, nu]);
     toast(`User created · ${u.name}`, ROLE_META[u.role].color);
@@ -1011,13 +1097,19 @@ export default function App() {
   /* Every edit records who made it and when, so lists can show
      "Edited by <name> · <time>" — a simple audit trail for the owner. */
   const stamp = () => ({ editedBy: session ? session.name : "System", editedAt: now() });
-  const updateUser = (id, patch) => {
+  const updateUser = async (id, patch) => {
     // Usernames must stay unique, otherwise two people could sign in as one account.
     if (patch.username && users.some((u) => u.id !== id && u.username.toLowerCase() === patch.username.toLowerCase())) {
       toast(`Username "${patch.username}" is already taken`, "#FF5470"); return false;
     }
-    if (FIREBASE_READY) updateUserDoc(id, { ...patch, ...stamp() });
-    else setUsers((p) => p.map((u) => u.id === id ? { ...u, ...patch, ...stamp() } : u));
+    const p2 = { ...patch };
+    // If a new PIN was typed, hash it and strip the plaintext + any old hash.
+    if (p2.pin && p2.pin !== "----") {
+      const h = await hashPin(p2.pin);
+      if (h) { p2.pinHash = h; delete p2.pin; }
+    } else { delete p2.pin; }
+    if (FIREBASE_READY) updateUserDoc(id, { ...p2, ...stamp() });
+    else setUsers((p) => p.map((u) => u.id === id ? { ...u, ...p2, ...stamp() } : u));
     toast(`Staff updated · ${patch.name || ""}`, "#5A9CFF");
     return true;
   };
@@ -1099,7 +1191,7 @@ export default function App() {
     setStatus, markServed, markPreparing, markReady, riderStep, notifs, cancel, togglePriority, setDeliveryFee, attachPayment, setPaid, setUnpaid, addOrder, addItemsToOrder, addUser, toggleUser, deleteUser,
     setSalary, addAdvance, paySalary, unpaySalary, addStock, restock, buyStock, purchases, addRequest, fulfillRequest, rejectRequest,
     addMenuItem, toggleMenuItem, toggleMenuBranch, deleteMenuItem, updateMenuItem, updateUser, updateInventory, deleteInventory, branchOpen, toggleBranch,
-    pulse: pulse.current, auto, setAuto, toast };
+    pulse: pulse.current, auto, setAuto, toast, goLiveReset };
 
   /* Keep the address bar in step with the screen, so a staff member who opened
      /admin still sees /admin after a refresh, and customers stay on "/". */
@@ -1340,9 +1432,12 @@ function Login({ onLogin, dark, setDark, users, onHome, onOrder }) {
      After 5 wrong attempts the form locks for 60 seconds.
      NOTE: this only slows an attacker down — real rate limiting must live on the
      server, because anything in the browser can be bypassed. */
-  const signIn = () => {
+  const signIn = async () => {
     if (lockUntil > now()) { setErr(`Too many attempts. Try again in ${Math.ceil((lockUntil - now()) / 1000)}s.`); return; }
-    const f = users.find((x) => x.username.toLowerCase() === u.trim().toLowerCase() && x.pin === p.trim() && x.active);
+    // Find by username first, then verify the PIN with a hash-aware compare.
+    const byName = users.filter((x) => x.username.toLowerCase() === u.trim().toLowerCase() && x.active);
+    let f = null;
+    for (const cand of byName) { if (await pinMatches(cand, p)) { f = cand; break; } }
     if (!f) {
       const n = tries + 1; setTries(n);
       if (n >= 5) { setLockUntil(now() + 60000); setTries(0); setErr("Too many failed attempts. Locked for 60 seconds."); }
@@ -2228,7 +2323,7 @@ function Manager({ ctx, isAdmin, myBranch, onPreview }) {
         ))}
       </div>
       {tab === "dash" && <Dashboard ctx={ctx} branch={branch} />}
-      {tab === "ops" && <ManagerOps ctx={ctx} branch={branch} onPrint={setPrintOrder} />}
+      {tab === "ops" && <ManagerOps ctx={ctx} branch={branch} onPrint={setPrintOrder} isAdmin={isAdmin} />}
       {tab === "inv" && <Inventory ctx={ctx} branch={branch} isAdmin={isAdmin} />}
       {tab === "reports" && isAdmin && <Reports ctx={ctx} branch={branch} />}
       {tab === "menu" && isAdmin && <MenuManager ctx={ctx} />}
@@ -2490,7 +2585,53 @@ function AddItemsBar({ o, ctx }) {
     </div>
   );
 }
-function ManagerOps({ ctx, branch, onPrint }) {
+/* One-time "Go Live" tool for the owner: wipes all demo/test data so the
+   restaurant starts from zero. Guarded behind a typed confirmation so it can
+   never fire by accident. Menu is always kept. */
+function GoLivePanel({ ctx }) {
+  const [open, setOpen] = useState(false);
+  const [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState("");
+  const run = async () => {
+    setBusy(true);
+    const res = await ctx.goLiveReset();
+    setBusy(false);
+    setDone(res || "Done.");
+    setConfirm("");
+  };
+  return (
+    <div className="hz-golive">
+      <div className="hz-golive-head">
+        <div className="hz-golive-ic"><AlertTriangle size={18} /></div>
+        <div>
+          <b>Go Live — reset all data</b>
+          <span>Deletes every order, clears inventory / purchases / requests, and removes the demo staff. Your menu is kept, and no admin account is ever deleted — so you stay logged in. Use this once, before opening to the public.</span>
+        </div>
+        <button className="hz-ghost" onClick={() => { setOpen((o) => !o); setDone(""); setConfirm(""); }}>{open ? "Close" : "Open"}</button>
+      </div>
+      {open && (
+        <div className="hz-golive-body">
+          {done ? (
+            <div className="hz-golive-done"><CheckCircle2 size={15} /> {done}</div>
+          ) : (
+            <>
+              <p className="hz-golive-warn">This cannot be undone. To confirm, type <b>RESET</b> below and press the button.</p>
+              <div className="hz-golive-row">
+                <input className="hz-inp" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder="Type RESET" />
+                <button className="hz-cta danger" disabled={confirm.trim().toUpperCase() !== "RESET" || busy} onClick={run}>
+                  {busy ? "Resetting…" : <><Trash2 size={15} />Reset to zero &amp; go live</>}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ManagerOps({ ctx, branch, onPrint, isAdmin }) {
   const inB = (o) => branch === "all" || o.branch === branch;
   const [dayFilter, setDayFilter] = useState("today"); // today | yesterday | week | all
   const DAY_FILTERS = [
@@ -2525,6 +2666,7 @@ function ManagerOps({ ctx, branch, onPrint }) {
   const groups = []; { let last = null; for (const o of all) { const lbl = dayLabel(o.createdAt); if (lbl !== last) { groups.push({ label: lbl, items: [] }); last = lbl; } groups[groups.length - 1].items.push(o); } }
   return (
     <>
+      {isAdmin && <GoLivePanel ctx={ctx} />}
       <div className="hz-mkpis">
         <Kpi icon={ShoppingBag} label="Orders" val={all.length} c="#FF6B2C" />
         <Kpi icon={Clock} label="Active Now" val={active.length} c="#FFB22C" />
@@ -2577,7 +2719,7 @@ function ManagerOps({ ctx, branch, onPrint }) {
                     <button className="hz-mini" title="Verify — online payment received" onClick={() => ctx.setPaid(o.id)}><ShieldCheck size={13} /></button>
                     <button className="hz-mini" title="Not received — switch to cash" onClick={() => ctx.setUnpaid(o.id)}><AlertTriangle size={13} /></button>
                   </>}
-                  <button className="hz-mini danger" onClick={() => ctx.cancel(o.id)}><Trash2 size={13} /></button></div>
+                  <button className="hz-mini danger" title="Delete this order" onClick={() => { if (window.confirm(`Delete order #${o.q}? This permanently removes it and cannot be undone.`)) ctx.cancel(o.id); }}><Trash2 size={13} /></button></div>
               {/* Every stage the customer's own tracking screen shows, as clickable icons —
                   tapping one updates their screen live. */}
               {o.status !== "completed" && <StageIcons o={o} ctx={ctx} />}
@@ -3030,8 +3172,10 @@ function MenuEditRow({ it, cats, onCancel, onSave }) {
     </div>
   );
 }
-function PinCell({ pin }) {
+function PinCell({ pin, hashed }) {
   const [show, setShow] = useState(false);
+  // Hashed PINs can't be revealed (that's the point). Show a lock + hint to reset.
+  if (hashed && !pin) return <span className="hz-pincell locked" title="PIN is encrypted and can't be shown. Edit the staff member to set a new one.">•••• 🔒</span>;
   return <button className="hz-pincell" onClick={() => setShow((v) => !v)} title={show ? "Hide PIN" : "Show PIN"}>{show ? pin : "••••"}</button>;
 }
 /* Staff accounts: create people, switch them between On duty / On leave
@@ -3089,12 +3233,12 @@ function StaffUsers({ ctx, isAdmin, myBranch, branch }) {
           {list.length === 0 && <Empty text="No staff in this branch yet." />}
           {list.map((u) => (
           editId === u.id
-            ? <StaffEditRow key={u.id} u={u} roles={roles} isAdmin={isAdmin} onCancel={() => setEditId(null)} onSave={(patch) => { if (ctx.updateUser(u.id, patch) !== false) setEditId(null); }} />
+            ? <StaffEditRow key={u.id} u={u} roles={roles} isAdmin={isAdmin} onCancel={() => setEditId(null)} onSave={async (patch) => { if (await ctx.updateUser(u.id, patch) !== false) setEditId(null); }} />
             : (
           <div className={"hz-userrow" + (u.active ? "" : " off")} key={u.id}>
             <span className="hz-wp-av sm" style={{ background: `linear-gradient(135deg, ${ROLE_META[u.role].color}, var(--saffron))` }}>{u.name[0]}</span>
             <div className="hz-user-main"><div className="hz-user-top"><b>{u.name}</b><span className="hz-demobadge" style={{ color: ROLE_META[u.role].color, background: ROLE_META[u.role].color + "1e" }}>{ROLE_META[u.role].label}</span>{u.branch !== "all" && <BranchTag b={u.branch} />}</div>
-              <div className="hz-user-cred">{NO_LOGIN_ROLES.includes(u.role) ? <><Wallet size={11} />payroll only · no login</> : <><User size={11} />{u.username} <Lock size={11} /><PinCell pin={u.pin} /></>}{u.salary > 0 && <span className="hz-salchip">{rs(u.salary)}/mo</span>}</div>
+              <div className="hz-user-cred">{NO_LOGIN_ROLES.includes(u.role) ? <><Wallet size={11} />payroll only · no login</> : <><User size={11} />{u.username} <Lock size={11} /><PinCell pin={u.pin} hashed={!!u.pinHash} /></>}{u.salary > 0 && <span className="hz-salchip">{rs(u.salary)}/mo</span>}</div>
               <EditedBy item={u} /></div>
             <div className="hz-dutywrap">
               <span className={"hz-dutytag " + (u.active ? "on" : "off")}>{u.active ? "On duty" : "On leave"}</span>
@@ -3113,18 +3257,27 @@ function StaffUsers({ ctx, isAdmin, myBranch, branch }) {
 function StaffEditRow({ u, roles, isAdmin, onCancel, onSave }) {
   const [n, setN] = useState(u.name);
   const [un, setUn] = useState(u.username);
-  const [pin, setPin] = useState(u.pin === "----" ? "" : u.pin);
+  // Hashed accounts can't show the old PIN; leave blank (empty = keep current).
+  const [pin, setPin] = useState((u.pin === "----" || u.pinHash) ? "" : (u.pin || ""));
   const [role, setRole] = useState(u.role);
   const [sal, setSal] = useState(String(u.salary || ""));
   const [br, setBr] = useState(u.branch);
   const noLogin = NO_LOGIN_ROLES.includes(role);
-  const ok = n.trim() && (noLogin || (un.trim() && pin.trim().length >= 4));
-  const save = () => onSave({
-    name: n.trim(), role, branch: role === "admin" ? "all" : br,
-    username: noLogin ? u.username : un.trim().toLowerCase(),
-    pin: noLogin ? "----" : pin.trim(),
-    salary: +sal || 0,
-  });
+  const hasStoredPin = !!u.pinHash || (u.pin && u.pin !== "----");
+  // Valid if: name set AND (no-login) OR (username set AND (a valid new PIN typed OR an existing PIN we're keeping)).
+  const pinOk = pin.trim().length >= 4 || (hasStoredPin && pin.trim() === "");
+  const ok = n.trim() && (noLogin || (un.trim() && pinOk));
+  const save = () => {
+    const patch = {
+      name: n.trim(), role, branch: role === "admin" ? "all" : br,
+      username: noLogin ? u.username : un.trim().toLowerCase(),
+      salary: +sal || 0,
+    };
+    if (noLogin) patch.pin = "----";
+    else if (pin.trim()) patch.pin = pin.trim();   // new PIN typed → will be hashed in updateUser
+    // else: blank → omit pin entirely so the existing (hashed) PIN is kept
+    onSave(patch);
+  };
   return (
     <div className="hz-editrow">
       <div className="hz-editrow-h"><Pencil size={13} />Editing staff member</div>
@@ -3136,7 +3289,7 @@ function StaffEditRow({ u, roles, isAdmin, onCancel, onSave }) {
         {isAdmin && role !== "admin" && <label>Branch<div className="hz-segt sm" style={{ margin: 0 }}>{BRANCHES.map((b) => <button key={b.id} className={br === b.id ? "on" : ""} onClick={() => setBr(b.id)}>{b.name}</button>)}</div></label>}
         {noLogin
           ? <div className="hz-branchnote"><ChefHat size={12} />Payroll only — no username or PIN</div>
-          : <div className="hz-row2"><label>Username<input value={un} onChange={(e) => setUn(e.target.value)} /></label><label>PIN<input value={pin} maxLength={6} onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))} /></label></div>}
+          : <div className="hz-row2"><label>Username<input value={un} onChange={(e) => setUn(e.target.value)} /></label><label>PIN {hasStoredPin && <span style={{ fontSize: "10px", opacity: .6 }}>(blank = keep current)</span>}<input value={pin} maxLength={6} placeholder={hasStoredPin ? "•••• (unchanged)" : "4–6 digits"} onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))} /></label></div>}
         <label>Monthly salary (Rs)<input value={sal} onChange={(e) => setSal(e.target.value.replace(/[^\d]/g, ""))} placeholder="0" /></label>
         <div className="hz-corow2">
           <button className="hz-ghost" onClick={onCancel}><X size={14} />Cancel</button>
@@ -3783,6 +3936,21 @@ const CSS = `
 .hz-cnote{display:flex;align-items:center;gap:7px;padding:11px 13px;border-radius:11px;font-size:13px;font-weight:600;background:var(--surface2);margin-top:8px;}
 .hz-cnote.ready,.hz-cnote.done{color:var(--jade);background:color-mix(in srgb,var(--jade) 13%,transparent);}
 
+.hz-golive{border:1.5px solid color-mix(in srgb,#FF5470 45%,var(--border));background:color-mix(in srgb,#FF5470 7%,var(--surface));border-radius:15px;padding:14px 16px;margin-bottom:14px;}
+.hz-golive-head{display:flex;align-items:flex-start;gap:12px;}
+.hz-golive-ic{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;color:#fff;background:#FF5470;flex-shrink:0;}
+.hz-golive-head>div{flex:1;}
+.hz-golive-head b{display:block;font-size:14.5px;}
+.hz-golive-head span{font-size:12px;color:var(--muted);line-height:1.4;display:block;margin-top:2px;}
+.hz-golive-head .hz-ghost{flex-shrink:0;align-self:center;}
+.hz-golive-body{margin-top:12px;padding-top:12px;border-top:1px solid var(--border);}
+.hz-golive-warn{font-size:12.5px;color:var(--text);margin-bottom:10px;}
+.hz-golive-warn b{color:#FF5470;}
+.hz-golive-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+.hz-golive-row .hz-inp{flex:1;min-width:120px;}
+.hz-cta.danger{background:#FF5470;color:#fff;}
+.hz-cta.danger:disabled{opacity:.5;cursor:not-allowed;}
+.hz-golive-done{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:#29D3A6;}
 .hz-mkpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:14px;}
 /* duty toggle + tax bits */
 .hz-dutywrap{display:flex;align-items:center;gap:8px;flex-shrink:0;}
@@ -3815,6 +3983,7 @@ const CSS = `
 .hz-editedby{display:inline-flex;align-items:center;gap:4px;font-size:10.5px;color:var(--muted);margin-top:5px;font-style:italic;}
 .hz-salchip{font-size:10.5px;font-weight:700;color:var(--jade);background:color-mix(in srgb,var(--jade) 12%,transparent);padding:2px 7px;border-radius:99px;margin-left:6px;}
 .hz-pincell{font-family:var(--fm);font-size:11.5px;letter-spacing:.08em;color:var(--muted);background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:1px 7px;cursor:pointer;}
+.hz-pincell.locked{cursor:help;opacity:.7;}
 .hz-pincell:hover{color:var(--text);}
 /* dashboard */
 .hz-dashrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:14px;}
