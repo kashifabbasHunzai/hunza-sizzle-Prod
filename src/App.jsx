@@ -551,12 +551,18 @@ export default function App() {
   }, [session]);
   const [page, setPage] = useState("home");
   const [preview, setPreview] = useState(null); // {branch, table} — QR dine-in entry
-  const [users, setUsers] = useState(SEED_USERS);
-  const [orders, setOrders] = useState([...HISTORY, ...seed]);
-  const [inventory, setInventory] = useState(SEED_INVENTORY);
-  const [purchases, setPurchases] = useState(SEED_PURCHASES);
-  const [requests, setRequests] = useState(SEED_REQUESTS);
-  const [menu, setMenu] = useState(SEED_MENU);
+  /* When Firebase is connected (the real deployment), start EVERY shared list
+     empty and let the live database fill them in. The built-in SEED_* values are
+     only used as an offline/demo fallback when there's no database. Seeding them
+     into state on a live app was the root of the "deleted stock reappears" bug:
+     the dummy purchases/inventory sat in memory and the meta-write effect pushed
+     them back to Firestore after every delete. */
+  const [users, setUsers] = useState(FIREBASE_READY ? [] : SEED_USERS);
+  const [orders, setOrders] = useState(FIREBASE_READY ? [] : [...HISTORY, ...seed]);
+  const [inventory, setInventory] = useState(FIREBASE_READY ? [] : SEED_INVENTORY);
+  const [purchases, setPurchases] = useState(FIREBASE_READY ? [] : SEED_PURCHASES);
+  const [requests, setRequests] = useState(FIREBASE_READY ? [] : SEED_REQUESTS);
+  const [menu, setMenu] = useState(SEED_MENU);   // menu always seeds (77 items); DB overrides if newer
   const [branchOpen, setBranchOpen] = useState({ g91: true, i8: true });
   /* Once the owner runs the one-time "Go Live" reset, this becomes true and the
      reset panel disappears for good (it's saved in the database, so it stays
@@ -622,17 +628,20 @@ export default function App() {
     (async () => {
       try {
         await authReady;   // ensure we're signed in (anonymously) before any write, so security rules pass
-        const ordersCol = collection(db, "orders");
-        const existing = await getDocs(ordersCol);
-        if (existing.empty) {
-          const all = [...HISTORY, ...seed];
-          for (let i = 0; i < all.length; i += 400) {           // Firestore batch limit is 500 writes
-            const batch = writeBatch(db);
-            all.slice(i, i + 400).forEach((o) => batch.set(doc(db, "orders", o.id), sanitize(o)));
-            await batch.commit();
-          }
-          await setDoc(doc(db, "hunza", "counters"), { orderSeq: QC }, { merge: true });
-        }
+        /* If the owner has already run the one-time "Go Live" reset, NEVER
+           seed again. Without this, an empty orders collection after the reset
+           looks like a brand-new database, so the demo history/orders (and the
+           demo purchases that made profit read −16,000) would silently come
+           back on the next reload. */
+        const liveRef = doc(db, "hunza", "meta");
+        const liveSnap = await getDoc(liveRef);
+        if (liveSnap.exists() && liveSnap.data().wentLive === true) return;
+        /* First-run seeding for a fresh database. We ONLY seed the things a real
+           shop needs on day one: the staff logins and the menu. We deliberately
+           DO NOT seed demo orders, demo purchases, or demo inventory anymore —
+           those were sample/among data that made the dashboard show fake stock
+           value (156,426) and negative profit (−19,990), and kept coming back.
+           A real shop starts with zero orders and adds its own stock. */
         const usersCol = collection(db, "users");
         const existingUsers = await getDocs(usersCol);
         if (existingUsers.empty) {
@@ -643,7 +652,8 @@ export default function App() {
         const mRef = doc(db, "hunza", "meta");
         const mSnap = await getDoc(mRef);
         if (!mSnap.exists()) {
-          await setDoc(mRef, { menu: stripMenuImages(SEED_MENU), menuVersion: MENU_VERSION, inventory: SEED_INVENTORY, purchases: SEED_PURCHASES, requests: SEED_REQUESTS, branchOpen: { g91: true, i8: true } });
+          // Fresh DB: seed the menu only. Inventory/purchases/requests start EMPTY.
+          await setDoc(mRef, { menu: stripMenuImages(SEED_MENU), menuVersion: MENU_VERSION, inventory: [], purchases: [], requests: [], branchOpen: { g91: true, i8: true } });
         } else {
           /* The meta doc already exists (e.g. from an earlier version / a test
              order). If it carries an older menu than the code, upgrade it: push
@@ -703,6 +713,7 @@ export default function App() {
       const d = snap.data();
       if (JSON.stringify(d) !== JSON.stringify(remoteMetaRef.current)) {
         remoteMetaRef.current = d;
+        const live = d.wentLive === true;
         /* Only trust the menu coming from the database if it's at least as new
            as the code's MENU_VERSION. If the saved menu is older (or has no
            version), keep showing SEED_MENU — the seed effect above is already
@@ -710,9 +721,23 @@ export default function App() {
            stale one from before that write landed. Without this guard the old
            12-item menu would flash back over the new 77-item menu. */
         if (d.menu && (d.menuVersion || 0) >= MENU_VERSION) setMenu(restoreMenuImages(d.menu, SEED_MENU));
-        if (d.inventory) setInventory(d.inventory);
-        if (d.purchases) setPurchases(d.purchases);
-        if (d.requests) setRequests(d.requests);
+        /* CORE FIX for "deleted stock keeps coming back": once the shop is LIVE,
+           the database is the single source of truth. If a field is missing or
+           empty in the DB, we must show EMPTY — never fall back to the built-in
+           dummy SEED_* values still sitting in memory from first load. Before
+           this, deleting `purchases`/`inventory` in the DB made `if (d.purchases)`
+           false, so the app kept its demo data and the write-effect pushed it
+           straight back — hence the 156,426 stock value and −19,990 profit that
+           reappeared on every refresh. */
+        if (live) {
+          setInventory(Array.isArray(d.inventory) ? d.inventory : []);
+          setPurchases(Array.isArray(d.purchases) ? d.purchases : []);
+          setRequests(Array.isArray(d.requests) ? d.requests : []);
+        } else {
+          if (d.inventory) setInventory(d.inventory);
+          if (d.purchases) setPurchases(d.purchases);
+          if (d.requests) setRequests(d.requests);
+        }
         if (d.branchOpen) setBranchOpen(d.branchOpen);
         if (typeof d.wentLive === "boolean") setWentLive(d.wentLive);
       }
@@ -740,9 +765,20 @@ export default function App() {
        reverts on refresh" bug: each load was silently re-seeding the database. */
     if (!metaLoadedRef.current) return;
     const current = { menu, inventory, purchases, requests, branchOpen };
-    const json = JSON.stringify(current);
-    if (json === JSON.stringify(remoteMetaRef.current)) return;
-    remoteMetaRef.current = current;
+    /* Compare only against the same five fields we actually write. The stored
+       remote snapshot (remoteMetaRef) also holds wentLive/menuVersion, so we
+       must NOT compare the whole object — otherwise this effect thinks there's
+       always a difference and re-writes on every render. That spurious re-write,
+       racing with a just-deleted field, is what pushed the old purchases back
+       into Firestore right after they were deleted. */
+    const remote = remoteMetaRef.current || {};
+    const remoteSubset = {
+      menu: remote.menu, inventory: remote.inventory, purchases: remote.purchases,
+      requests: remote.requests, branchOpen: remote.branchOpen,
+    };
+    if (JSON.stringify(metaForWrite(current)) === JSON.stringify({ ...metaForWrite(remoteSubset) })) return;
+    // Keep the stored snapshot in sync (preserve wentLive so we never lose it).
+    remoteMetaRef.current = { ...remote, ...current };
     setDoc(doc(db, "hunza", "meta"), sanitize(metaForWrite(current)), { merge: true }).catch((e) => console.error("Firestore meta write failed", e));
   }, [menu, inventory, purchases, requests, branchOpen]);
 
@@ -940,6 +976,14 @@ export default function App() {
       // 5) Reset the order-number counter back to the start.
       await setDoc(doc(db, "hunza", "counters"), { orderSeq: 100 }, { merge: true });
       qref.current = 100;
+      /* CRITICAL: also clear the in-memory state right now. The meta-write
+         effect watches `purchases`/`inventory`/`requests`; if we leave the old
+         values in state, that effect immediately pushes them straight back into
+         Firestore — which is exactly why stock/purchases (and the −16,000
+         profit) survived the reset. Clearing local orders too stops the stale
+         demo orders from lingering on screen until the next snapshot. */
+      remoteMetaRef.current = { ...(remoteMetaRef.current || {}), inventory: [], purchases: [], requests: [] };
+      setInventory([]); setPurchases([]); setRequests([]); setOrders([]); setNotifs([]);
       toast("✅ System reset — you are now live. Data starts from zero.", "#29D3A6");
       return `Deleted ${ordIds.length} orders, ${toDelete.length} demo staff, ${ntIds.length} notifications. Inventory, purchases & requests cleared. Menu kept.`;
     } catch (e) {
