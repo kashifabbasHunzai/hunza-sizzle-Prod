@@ -727,11 +727,10 @@ export default function App() {
       const path = window.location.pathname.replace(/\/+$/, "").toLowerCase();
       const isStaffPath = STAFF_PATHS.includes(path);
       if (isStaffPath || p.get("staff") === "1" || window.location.hash.toLowerCase() === "#staff") { setPage("staff"); return; }
-      // A hard refresh remounts the whole app, resetting `page` back to
-      // "home" — if this browser has an order still in progress, jump
-      // straight into the order flow so it can resume tracking it (the
-      // actual resume-to-Track happens inside OrderFlow once orders sync).
-      if (hasActiveMyOrder()) setPage("order");
+      /* Customers always land on the home page. (We used to jump straight into
+         the order flow if this browser had an order in progress, but that made
+         a stale test order send every visitor to the menu instead of the home
+         page. Customers can reopen their order any time from "My Orders".) */
     } catch (e) { /* sandboxed preview — window may be unavailable */ }
   }, []);
 
@@ -1302,7 +1301,7 @@ function HomePage({ menu, dark, setDark, branchOpen, onOrder, onStaff }) {
       <footer className="hz-hfoot">
         <div className="hz-hfoot-top">
           <div className="hz-brand"><div className="hz-logo"><HunzaLogo size={26} compact /></div><div className="hz-bn">De-Hunza <span>Sizzle</span></div></div>
-          <a className="hz-foot-call" href={`tel:${RESTAURANT_PHONE.replace(/[^0-9+]/g, "")}`}><Phone size={14} /> Home Delivery: {RESTAURANT_PHONE}</a>
+          <a className="hz-foot-call" href={`tel:${RESTAURANT_PHONE.replace(/[^0-9+]/g, "")}`}><Phone size={14} /> Contact: {RESTAURANT_PHONE}</a>
         </div>
 
         <div className="hz-foot-branches">
@@ -3428,27 +3427,32 @@ function PrintModal({ order: o, onClose }) {
     const pageBreak = w === "both" ? ".hz-receipt.kitchen{page-break-after:always;break-after:page;}" : "";
     win.document.open();
     win.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Order #${o.q}</title><style>
-      *{margin:0;padding:0;box-sizing:border-box;}
+      *{margin:0;padding:0;box-sizing:border-box;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
       @page{size:80mm auto portrait;margin:0;}
       html,body{background:#fff;width:80mm;}
-      body{font-family:"Arial Black","Helvetica Neue",Arial,sans-serif;color:#000;}
+      /* Thermal printers print faint/grey text poorly, so everything on the
+         receipt is forced to heavy weight and pure solid black. */
+      body{font-family:"Arial Black","Helvetica Neue",Arial,sans-serif;color:#000;font-weight:900;-webkit-text-stroke:0.2px #000;}
       .hz-receipts{display:block;}
-      .hz-receipt{width:72mm;max-width:72mm;margin:0 auto;padding:2mm 2mm 3mm;font-size:12.5px;line-height:1.42;font-weight:700;color:#000;}
-      .hz-rc-tag{display:inline-block;background:#000;color:#fff;font-weight:900;padding:1mm 2mm;margin-bottom:2mm;}
+      .hz-receipt{width:72mm;max-width:72mm;margin:0 auto;padding:2mm 2mm 3mm;font-size:12.5px;line-height:1.42;font-weight:900;color:#000;}
+      .hz-receipt *{color:#000!important;font-weight:900!important;}
+      .hz-rc-tag{display:inline-block;background:#000;color:#fff!important;font-weight:900;padding:1mm 2mm;margin-bottom:2mm;}
+      .hz-rc-tag *{color:#fff!important;}
       .hz-rc-title{font-size:17px;font-weight:900;letter-spacing:.02em;}
       .hz-rc-title.big{font-size:20px;}
-      .hz-rc-sub{font-size:11px;margin:0 0 1mm;}
-      .hz-rc-hr{border-top:1px solid #000;margin:2mm 0;}
-      .hz-rc-row{display:flex;justify-content:space-between;gap:6px;margin:1mm 0;font-size:12px;}
+      .hz-rc-sub{font-size:11.5px;margin:0 0 1mm;}
+      .hz-rc-hr{border-top:1.5px solid #000;margin:2mm 0;}
+      .hz-rc-row{display:flex;justify-content:space-between;gap:6px;margin:1mm 0;font-size:12.5px;}
       .hz-rc-row b.addr{max-width:42mm;text-align:right;}
-      .hz-rc-row.total{border-top:2px solid #000;border-bottom:2px solid #000;font-size:15px;font-weight:900;padding:1.5mm 0;margin:2mm 0;}
-      .hz-rc-items{width:100%;border-collapse:collapse;margin:2mm 0;font-size:11.5px;}
+      .hz-rc-row.total{border-top:2.5px solid #000;border-bottom:2.5px solid #000;font-size:15px;font-weight:900;padding:1.5mm 0;margin:2mm 0;}
+      .hz-rc-items{width:100%;border-collapse:collapse;margin:2mm 0;font-size:12px;}
       .hz-rc-items td{padding:1mm 0;vertical-align:top;}
       .hz-rc-items td.qty{white-space:nowrap;padding-right:4px;}
       .hz-rc-items td.amt{width:22mm;text-align:right;}
-      .hz-rc-items tr.head td{border-bottom:1.5px solid #000;font-weight:900;}
-      .hz-rc-note{font-size:11px;font-style:italic;margin:1mm 0;}
+      .hz-rc-items tr.head td{border-bottom:2px solid #000;font-weight:900;}
+      .hz-rc-note{font-size:11.5px;font-style:italic;margin:1mm 0;}
       .hz-rc-foot{text-align:center;font-size:10.5px;margin-top:2mm;}
+      .hz-rc-vendor{border-top:1.5px dashed #000;margin-top:2mm;padding-top:1.5mm;font-size:8.5px;line-height:1.3;}
       ${w === "kitchen" ? ".hz-receipt.bill{display:none;}" : w === "bill" ? ".hz-receipt.kitchen{display:none;}" : pageBreak}
     </style></head><body>${receiptsEl.outerHTML}</body></html>`);
     win.document.close();
@@ -3539,7 +3543,8 @@ function PrintModal({ order: o, onClose }) {
           <div className="hz-rc-row total"><span>TOTAL</span><b>{rs(subtotal + fee + tax)}</b></div>
           <div className="hz-rc-row"><span>Payment</span><b>{(o.payMethod === "card" ? "CARD/ONLINE · " : o.payMethod ? "CASH · " : "") + (o.payment === "paid" ? "PAID" : o.payment === "pending" ? "PENDING VERIFICATION" : "UNPAID")}</b></div>
           <div className="hz-rc-hr" />
-          <div className="hz-rc-foot">Thank you for choosing De-Hunza Sizzle!<br />Chinese &amp; Fast Food · Islamabad<br />Ph: {RESTAURANT_PHONE}<br /><span style={{ fontSize: "9px", opacity: .8 }}>Software by {SOFTWARE_VENDOR} · {SOFTWARE_PHONE}<br />{SOFTWARE_SLOGAN}</span></div>
+          <div className="hz-rc-foot">Thank you for choosing De-Hunza Sizzle!<br />Chinese &amp; Fast Food · Islamabad<br />Ph: {RESTAURANT_PHONE}</div>
+          <div className="hz-rc-vendor">Software by {SOFTWARE_VENDOR} · {SOFTWARE_PHONE}<br />{SOFTWARE_SLOGAN}</div>
         </div>
       </div>
     </div>
@@ -4170,7 +4175,7 @@ a.hz-hbranch-addr:hover{color:var(--ember);}
 .hz-hbranch .hz-cta{margin-top:8px;align-self:flex-start;}
 .hz-hband{max-width:1100px;margin:40px auto 0;padding:0 20px;}
 .hz-hband-in{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap;padding:30px;border-radius:20px;background:linear-gradient(120deg,var(--ember),var(--saffron));color:#fff;overflow:hidden;position:relative;}
-.hz-hband-in::after{content:"";position:absolute;inset:0;background:radial-gradient(circle at 90% -20%,rgba(255,255,255,.3),transparent 50%);}
+.hz-hband-in::after{content:"";position:absolute;inset:0;background:radial-gradient(circle at 90% -20%,rgba(255,255,255,.3),transparent 50%);pointer-events:none;}
 .hz-hband-in>div{position:relative;}
 .hz-hband h2{font-size:25px;font-weight:800;}
 .hz-hband p{font-size:14px;opacity:.94;margin:6px 0 0;}
@@ -4507,6 +4512,7 @@ a.hz-hbranch-addr:hover{color:var(--ember);}
 .hz-rc-items tr.head td{font-weight:700;border-bottom:1px solid #111;color:#111;}
 .hz-rc-note{font-weight:700;}
 .hz-rc-foot{text-align:center;font-size:10px;color:#555;margin-top:2px;}
+.hz-rc-vendor{text-align:center;font-size:8.5px;color:#777;margin-top:6px;padding-top:5px;border-top:1px dashed #bbb;line-height:1.3;}
 .hz-printroot.show-kitchen .hz-receipt.bill{opacity:.35;}
 .hz-printroot.show-bill .hz-receipt.kitchen{opacity:.35;}
 @media print {
@@ -4549,7 +4555,12 @@ a.hz-hbranch-addr:hover{color:var(--ember);}
                   -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }
   .hz-receipt .hz-rc-sub,
   .hz-receipt .hz-rc-row span,
-  .hz-receipt .hz-rc-foot { color:#000 !important; font-weight:700 !important; }
+  .hz-receipt .hz-rc-foot { color:#000 !important; font-weight:900 !important; }
+  .hz-receipt * { font-weight:900 !important; }
+  /* Vendor credit sits below a divider line, smaller than the rest. */
+  .hz-receipt .hz-rc-vendor { border-top:1.5px dashed #000 !important; margin-top:2mm !important;
+                              padding-top:1.5mm !important; font-size:8.5px !important; line-height:1.3 !important;
+                              text-align:center !important; color:#000 !important; }
   /* Solid separators beat dashed/grey ones on a thermal head. */
   .hz-receipt .hz-rc-hr { border-top:1px solid #000 !important; margin:2mm 0 !important; }
   .hz-receipt .hz-rc-row.total { border-top:2px solid #000 !important; border-bottom:2px solid #000 !important;
