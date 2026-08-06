@@ -2322,7 +2322,7 @@ function Manager({ ctx, isAdmin, myBranch, onPreview }) {
           </button>
         ))}
       </div>
-      {tab === "dash" && <Dashboard ctx={ctx} branch={branch} />}
+      {tab === "dash" && <Dashboard ctx={ctx} branch={branch} isAdmin={isAdmin} />}
       {tab === "ops" && <ManagerOps ctx={ctx} branch={branch} onPrint={setPrintOrder} isAdmin={isAdmin} />}
       {tab === "inv" && <Inventory ctx={ctx} branch={branch} isAdmin={isAdmin} />}
       {tab === "reports" && isAdmin && <Reports ctx={ctx} branch={branch} />}
@@ -2336,7 +2336,7 @@ function Manager({ ctx, isAdmin, myBranch, onPreview }) {
 }
 /* Reporting dashboard: sales for today / yesterday / 7 days / month / year,
    a 7-day chart, money in vs out, tax collected, and per-staff daily activity. */
-function Dashboard({ ctx, branch }) {
+function Dashboard({ ctx, branch, isAdmin }) {
   const inB = (o) => branch === "all" || o.branch === branch;
   const orders = ctx.orders.filter(inB);
   const purchases = (ctx.purchases || []).filter((p) => branch === "all" || p.branch === branch);
@@ -2367,6 +2367,7 @@ function Dashboard({ ctx, branch }) {
 
   return (
     <>
+      {isAdmin && <GoLivePanel ctx={ctx} />}
       <div className="hz-branchstatus">
         <span className="hz-bs-lbl"><Building2 size={14} />Branch status<InfoTip label="About branch status">Closing a branch immediately stops customers from ordering there — it shows as “Closed” on the home page and cannot be selected at checkout.</InfoTip></span>
         {branchList.map((b) => { const open = ctx.branchOpen[b];
