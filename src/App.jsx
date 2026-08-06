@@ -150,18 +150,29 @@ const isThisYear = (ts) => new Date(ts).getFullYear() === new Date().getFullYear
 const dayLabel = (ts) => isToday(ts) ? "Today" : isYesterday(ts) ? "Yesterday" : new Date(ts).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 
 const BRANCHES = [
-  { id: "g91", name: "G-9/1", area: "Islamabad", addr: "Al Mujahid Market, G-9/1, Islamabad" },
-  { id: "i8", name: "I-8 Markaz", area: "Islamabad", addr: "I-8 Markaz, near Eidgah" },
+  {
+    id: "g91", name: "G-9/1", area: "Islamabad",
+    addr: "Al Mujahid Market, Street 51, G-9/1, Islamabad",
+    /* Tapping the address on the site opens this location in Google Maps. */
+    map: "https://www.google.com/maps/search/?api=1&query=De+Hunza+Sizzle+Al+Mujahid+Market+Street+51+G-9%2F1+Islamabad+44000+Pakistan",
+  },
+  {
+    id: "i8", name: "I-8 Markaz", area: "Islamabad",
+    addr: "I-8 Markaz, Islamabad",
+    map: "https://www.google.com/maps/search/?api=1&query=De+Hunza+Sizzle+I-8+M39F%2BGW4+I-8+Markaz+Islamabad+Pakistan",
+  },
 ];
 const branchName = (id) => BRANCHES.find((b) => b.id === id)?.name || id;
 const menuForBranch = (menu, b) => menu.filter((m) => m.available && (!m.branches || m.branches.includes(b)));
 
 /* Contact numbers shown across the app and on printed receipts.
    RESTAURANT_PHONE — the shop's public delivery/contact line (on menu card).
-   SOFTWARE_VENDOR / SOFTWARE_PHONE — the software maker's credit + support line. */
+   SOFTWARE_VENDOR / SOFTWARE_PHONE — the software maker's credit + support line.
+   SOFTWARE_SLOGAN — the developer company's tagline (shown on the site + bills). */
 const RESTAURANT_PHONE = "0312-9715730";
-const SOFTWARE_VENDOR = "MM Tech & AI";
+const SOFTWARE_VENDOR = "MM Tech & AI Solution";
 const SOFTWARE_PHONE = "0341-5561436";
+const SOFTWARE_SLOGAN = "Intelligent Solutions for a Smarter Future";
 
 const STAGES = ["new", "preparing", "ready", "completed"];
 const STAGE = {
@@ -1277,7 +1288,7 @@ function HomePage({ menu, dark, setDark, branchOpen, onOrder, onStaff }) {
           <div className={"hz-hbranch" + (open ? "" : " closed")} key={b.id}>
             <div className="hz-hbranch-top"><span className="hz-branch-ic"><Building2 size={20} /></span><span className={open ? "hz-openpill" : "hz-closedpill"}>{open ? "Open now" : "Closed"}</span></div>
             <b>De-Hunza Sizzle · {b.name}</b>
-            <span className="hz-hbranch-addr"><MapPin size={12} />{b.addr}</span>
+            <a className="hz-hbranch-addr hz-maplink" href={b.map} target="_blank" rel="noreferrer"><MapPin size={12} />{b.addr}<span className="hz-mapgo">View on map<ArrowRight size={11} /></span></a>
             <span className="hz-hbranch-addr"><Clock size={12} />11:00 AM – 2:00 AM daily</span>
             <button className="hz-cta sm" disabled={!open} onClick={onOrder}>{open ? `Order from ${b.name}` : "Currently closed"}{open && <ArrowRight size={14} />}</button>
           </div>
@@ -1289,11 +1300,30 @@ function HomePage({ menu, dark, setDark, branchOpen, onOrder, onStaff }) {
       </section>
 
       <footer className="hz-hfoot">
-        <div className="hz-brand"><div className="hz-logo"><HunzaLogo size={26} compact /></div><div className="hz-bn">De-Hunza <span>Sizzle</span></div></div>
-        <div className="hz-foot-meta">
-          <span>G-9/1 · I-8 Markaz, Islamabad · © {new Date().getFullYear()} De-Hunza Sizzle</span>
-          <span className="hz-foot-phone"><Phone size={12} /> Home Delivery: {RESTAURANT_PHONE}</span>
-          <span className="hz-credit">Designed &amp; developed by <b>{SOFTWARE_VENDOR}</b> · {SOFTWARE_PHONE}</span>
+        <div className="hz-hfoot-top">
+          <div className="hz-brand"><div className="hz-logo"><HunzaLogo size={26} compact /></div><div className="hz-bn">De-Hunza <span>Sizzle</span></div></div>
+          <a className="hz-foot-call" href={`tel:${RESTAURANT_PHONE.replace(/[^0-9+]/g, "")}`}><Phone size={14} /> Home Delivery: {RESTAURANT_PHONE}</a>
+        </div>
+
+        <div className="hz-foot-branches">
+          {BRANCHES.map((b) => (
+            <a className="hz-foot-loc" href={b.map} target="_blank" rel="noreferrer" key={b.id}>
+              <span className="hz-foot-loc-ic"><MapPin size={15} /></span>
+              <span className="hz-foot-loc-txt">
+                <b>De-Hunza Sizzle · {b.name}</b>
+                <span>{b.addr}</span>
+                <span className="hz-foot-loc-go">Open in Google Maps<ArrowRight size={11} /></span>
+              </span>
+            </a>
+          ))}
+        </div>
+
+        <div className="hz-foot-btm">
+          <span className="hz-foot-copy">© {new Date().getFullYear()} De-Hunza Sizzle · Islamabad</span>
+          <span className="hz-credit">
+            Designed &amp; developed by <b>{SOFTWARE_VENDOR}</b> · {SOFTWARE_PHONE}
+            <span className="hz-credit-slogan">{SOFTWARE_SLOGAN}</span>
+          </span>
         </div>
       </footer>
     </div>
@@ -2662,7 +2692,7 @@ function Reports({ ctx, branch }) {
       .r{text-align:right}.b{font-weight:700}tr.tot td{border-top:2px solid #111;font-weight:800;font-size:14px}</style></head><body>
       <h1>The Hunza Sizzle — ${title}</h1><h2>${branch === "all" ? "All branches" : branchName(branch)} · Generated ${new Date().toLocaleDateString("en-GB")}</h2>
       <table><thead>${head}</thead><tbody>${rowsHtml || '<tr><td colspan="6" style="text-align:center;color:#999;padding:30px">No data for this period</td></tr>'}</tbody><tfoot>${rowsHtml ? footHtml : ""}</tfoot></table>
-      <p style="margin-top:30px;font-size:10px;color:#999">Software by ${SOFTWARE_VENDOR} · ${SOFTWARE_PHONE} · The Hunza Sizzle</p></body></html>`);
+      <p style="margin-top:30px;font-size:10px;color:#999">Software by ${SOFTWARE_VENDOR} · ${SOFTWARE_PHONE} · The Hunza Sizzle<br>${SOFTWARE_SLOGAN}</p></body></html>`);
     w.document.close(); setTimeout(() => { w.focus(); w.print(); }, 250);
   };
 
@@ -3509,7 +3539,7 @@ function PrintModal({ order: o, onClose }) {
           <div className="hz-rc-row total"><span>TOTAL</span><b>{rs(subtotal + fee + tax)}</b></div>
           <div className="hz-rc-row"><span>Payment</span><b>{(o.payMethod === "card" ? "CARD/ONLINE · " : o.payMethod ? "CASH · " : "") + (o.payment === "paid" ? "PAID" : o.payment === "pending" ? "PENDING VERIFICATION" : "UNPAID")}</b></div>
           <div className="hz-rc-hr" />
-          <div className="hz-rc-foot">Thank you for choosing De-Hunza Sizzle!<br />Chinese &amp; Fast Food · Islamabad<br />Ph: {RESTAURANT_PHONE}<br /><span style={{ fontSize: "9px", opacity: .8 }}>Software by {SOFTWARE_VENDOR} · {SOFTWARE_PHONE}</span></div>
+          <div className="hz-rc-foot">Thank you for choosing De-Hunza Sizzle!<br />Chinese &amp; Fast Food · Islamabad<br />Ph: {RESTAURANT_PHONE}<br /><span style={{ fontSize: "9px", opacity: .8 }}>Software by {SOFTWARE_VENDOR} · {SOFTWARE_PHONE}<br />{SOFTWARE_SLOGAN}</span></div>
         </div>
       </div>
     </div>
@@ -4134,7 +4164,9 @@ const CSS = `
 .hz-hbranch{display:flex;flex-direction:column;gap:8px;padding:20px;border-radius:17px;background:var(--surface);border:1px solid var(--border);}
 .hz-hbranch-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;}
 .hz-hbranch b{font-size:16px;font-family:var(--fd);}
-.hz-hbranch-addr{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);}
+.hz-hbranch-addr{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);flex-wrap:wrap;}
+a.hz-hbranch-addr{transition:.15s;}
+a.hz-hbranch-addr:hover{color:var(--ember);}
 .hz-hbranch .hz-cta{margin-top:8px;align-self:flex-start;}
 .hz-hband{max-width:1100px;margin:40px auto 0;padding:0 20px;}
 .hz-hband-in{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap;padding:30px;border-radius:20px;background:linear-gradient(120deg,var(--ember),var(--saffron));color:#fff;overflow:hidden;position:relative;}
@@ -4143,13 +4175,28 @@ const CSS = `
 .hz-hband h2{font-size:25px;font-weight:800;}
 .hz-hband p{font-size:14px;opacity:.94;margin:6px 0 0;}
 .hz-hband-in .hz-cta{position:relative;background:#1a1410;color:#fff;}
-.hz-hfoot{max-width:1100px;margin:46px auto 0;padding:24px 20px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;}
-.hz-hfoot>span{font-size:12px;color:var(--muted);}
-.hz-foot-meta{display:flex;flex-direction:column;align-items:flex-end;gap:3px;text-align:right;}
-.hz-foot-meta>span{font-size:12px;color:var(--muted);}
-.hz-credit{font-size:11px!important;opacity:.8;}
+.hz-hfoot{max-width:1100px;margin:46px auto 0;padding:26px 20px 30px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:20px;}
+.hz-hfoot-top{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;}
+.hz-foot-call{display:inline-flex;align-items:center;gap:8px;font-size:13.5px;font-weight:700;color:var(--text);padding:9px 15px;border-radius:99px;background:color-mix(in srgb,var(--ember) 10%,transparent);border:1px solid color-mix(in srgb,var(--ember) 30%,transparent);transition:.16s;}
+.hz-foot-call:hover{background:color-mix(in srgb,var(--ember) 16%,transparent);border-color:var(--ember);}
+.hz-foot-call svg{color:var(--ember);}
+.hz-foot-branches{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+.hz-foot-loc{display:flex;align-items:flex-start;gap:11px;padding:14px 16px;border-radius:14px;background:var(--surface);border:1px solid var(--border);transition:.16s;}
+.hz-foot-loc:hover{border-color:var(--ember);transform:translateY(-2px);box-shadow:0 10px 24px -14px var(--ember);}
+.hz-foot-loc-ic{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;color:var(--ember);background:color-mix(in srgb,var(--ember) 12%,transparent);flex-shrink:0;}
+.hz-foot-loc-txt{display:flex;flex-direction:column;gap:2px;min-width:0;}
+.hz-foot-loc-txt>b{font-size:13.5px;font-family:var(--fd);}
+.hz-foot-loc-txt>span{font-size:12px;color:var(--muted);line-height:1.35;}
+.hz-foot-loc-go{display:inline-flex;align-items:center;gap:3px;font-size:11.5px!important;font-weight:700;color:var(--ember)!important;margin-top:3px;}
+.hz-foot-btm{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;padding-top:16px;border-top:1px solid var(--border);}
+.hz-foot-copy{font-size:12px;color:var(--muted);}
+.hz-credit{display:flex;flex-direction:column;gap:1px;font-size:11.5px;color:var(--muted);text-align:right;}
 .hz-credit b{color:var(--ember);font-weight:700;}
-@media (max-width:560px){.hz-foot-meta{align-items:flex-start;text-align:left;}}
+.hz-credit-slogan{font-size:11px;font-style:italic;opacity:.85;letter-spacing:.01em;}
+.hz-maplink{cursor:pointer;transition:.15s;}
+.hz-maplink:hover{color:var(--ember);}
+.hz-mapgo{display:inline-flex;align-items:center;gap:2px;font-size:11px;font-weight:700;color:var(--ember);margin-left:6px;}
+@media (max-width:560px){.hz-foot-branches{grid-template-columns:1fr;}.hz-foot-btm{flex-direction:column;align-items:flex-start;}.hz-credit{text-align:left;}}
 /* Customer boot loader (menu sync gate) */
 .hz-bootwrap{min-height:70vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;padding:30px 20px;}
 
