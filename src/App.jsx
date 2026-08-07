@@ -700,8 +700,12 @@ export default function App() {
     const unsubUsers = onSnapshot(collection(db, "users"), (snap) => {
       setUsers(snap.docs.map((d) => d.data()));
     }, (e) => { console.error("Firestore users listen failed", e); });
-    const unsubNotifs = onSnapshot(query(collection(db, "notifs"), orderBy("time", "desc"), limit(60)), (snap) => {
-      setNotifs(snap.docs.map((d) => d.data()));
+    const unsubNotifs = onSnapshot(query(collection(db, "notifs"), limit(80)), (snap) => {
+      /* Sort newest-first on the client instead of with orderBy() in the query.
+         An orderBy on a field some old docs might be missing can make the whole
+         query return nothing, which is why the bell showed no notifications. */
+      const list = snap.docs.map((d) => d.data()).sort((a, b) => (b.time || 0) - (a.time || 0)).slice(0, 60);
+      setNotifs(list);
     }, (e) => { console.error("Firestore notifs listen failed", e); });
     const unsubMeta = onSnapshot(doc(db, "hunza", "meta"), { includeMetadataChanges: false }, (snap) => {
       if (!snap.exists()) return;
@@ -971,21 +975,34 @@ export default function App() {
         await batch.commit();
       }
       // 4) Empty inventory / purchases / requests but KEEP the menu + version.
-      await setDoc(doc(db, "hunza", "meta"), { inventory: [], purchases: [], requests: [], wentLive: true }, { merge: true });
-      setWentLive(true);   // hide the reset panel from now on (persisted above)
+      //    We write the menu explicitly too, so the meta doc is fully consistent
+      //    and there's no stale field left anywhere.
+      const cleanMenu = stripMenuImages(menu && menu.length ? menu : SEED_MENU);
+      await setDoc(doc(db, "hunza", "meta"), {
+        menu: cleanMenu, menuVersion: MENU_VERSION,
+        inventory: [], purchases: [], requests: [],
+        branchOpen: branchOpen || { g91: true, i8: true },
+        wentLive: true,
+      }, { merge: true });
+      setWentLive(true);
       // 5) Reset the order-number counter back to the start.
       await setDoc(doc(db, "hunza", "counters"), { orderSeq: 100 }, { merge: true });
       qref.current = 100;
-      /* CRITICAL: also clear the in-memory state right now. The meta-write
-         effect watches `purchases`/`inventory`/`requests`; if we leave the old
-         values in state, that effect immediately pushes them straight back into
-         Firestore — which is exactly why stock/purchases (and the −16,000
-         profit) survived the reset. Clearing local orders too stops the stale
-         demo orders from lingering on screen until the next snapshot. */
-      remoteMetaRef.current = { ...(remoteMetaRef.current || {}), inventory: [], purchases: [], requests: [] };
+      /* CRITICAL: also clear the in-memory state right now, and update the
+         stored remote snapshot to the SAME cleared shape. If we leave old values
+         in state — or leave remoteMetaRef out of sync — the meta-write effect
+         immediately pushes stale data straight back into Firestore, which is
+         exactly why stock/purchases (and the negative profit) survived the reset
+         and reappeared on refresh. */
+      remoteMetaRef.current = {
+        menu: cleanMenu, menuVersion: MENU_VERSION,
+        inventory: [], purchases: [], requests: [],
+        branchOpen: branchOpen || { g91: true, i8: true },
+        wentLive: true,
+      };
       setInventory([]); setPurchases([]); setRequests([]); setOrders([]); setNotifs([]);
-      toast("✅ System reset — you are now live. Data starts from zero.", "#29D3A6");
-      return `Deleted ${ordIds.length} orders, ${toDelete.length} demo staff, ${ntIds.length} notifications. Inventory, purchases & requests cleared. Menu kept.`;
+      toast("✅ All data cleared — starting from zero.", "#29D3A6");
+      return `Cleared ${ordIds.length} orders, ${toDelete.length} demo staff, ${ntIds.length} notifications. Inventory, purchases & requests emptied. Menu kept.`;
     } catch (e) {
       console.error("Go-live reset failed", e);
       toast("Reset failed — check connection and try again", "#FF5470");
@@ -1285,11 +1302,13 @@ export default function App() {
   }
 
   if (!staffIn) {
-    // Same "wait for live data" gate as the staff side: on a fresh page load the
-    // menu/branch data would briefly show the built-in defaults and then snap to
-    // the real Firestore values (the ~5s flash of old data on the website).
-    // Show a small loader until the first real menu arrives.
-    const custLoading = FIREBASE_READY && !online;
+    /* Load speed: the HOME page needs no live data — the menu (77 items) and
+       branch list are built into the code, so we render it instantly and let
+       Firestore refresh prices in the background. Only the ORDER flow waits
+       briefly for live data, so customers always see the true current price
+       before they add to cart. This removes the ~5s "Loading menu…" wait that
+       every visitor used to hit on the landing page. */
+    const custLoading = FIREBASE_READY && !online && page === "order";
     return (
       <div className="hz" data-theme={dark ? "dark" : "light"}><style>{CSS}</style>
         {custLoading ? (
@@ -1324,11 +1343,6 @@ export default function App() {
         <div className="hz-bar-r">
           {FIREBASE_READY && <span className={"hz-synctag" + (online ? " on" : "")} title={online ? "Synced live with all devices" : "Connecting…"}>{online ? <Wifi size={12} /> : <WifiOff size={12} />}{online ? "Live" : "Connecting…"}</span>}
           <NotifBell notifs={ctx.notifs} session={session} />
-          {(session.role === "manager" || session.role === "admin") && (
-            <button className={"hz-ctl" + (auto ? " on" : "")} onClick={() => setAuto((v) => !v)}>
-              {auto ? <Pause size={14} /> : <Play size={14} />}{auto ? "Pause" : "Auto-flow"}
-            </button>
-          )}
           <button className="hz-icbtn" onClick={() => setDark((v) => !v)}>{dark ? <Sun size={16} /> : <Moon size={16} />}</button>
           <button className="hz-ctl" onClick={logout}><LogOut size={14} />Logout</button>
         </div>
@@ -2417,7 +2431,6 @@ function Dashboard({ ctx, branch, isAdmin }) {
 
   return (
     <>
-      {isAdmin && !ctx.wentLive && <GoLivePanel ctx={ctx} />}
       <div className="hz-branchstatus">
         <span className="hz-bs-lbl"><Building2 size={14} />Branch status<InfoTip label="About branch status">Closing a branch immediately stops customers from ordering there — it shows as “Closed” on the home page and cannot be selected at checkout.</InfoTip></span>
         {branchList.map((b) => { const open = ctx.branchOpen[b];
@@ -2656,8 +2669,8 @@ function GoLivePanel({ ctx }) {
       <div className="hz-golive-head">
         <div className="hz-golive-ic"><AlertTriangle size={18} /></div>
         <div>
-          <b>Go Live — reset all data</b>
-          <span>Deletes every order, clears inventory / purchases / requests, and removes the demo staff. Your menu is kept, and no admin account is ever deleted — so you stay logged in. Use this once, before opening to the public.</span>
+          <b>Clear all data — reset to zero</b>
+          <span>Deletes every order, and clears inventory / purchases / requests. Your menu (77 items) and admin login are always kept. Run this any time you want to wipe test/demo data and start clean.</span>
         </div>
         <button className="hz-ghost" onClick={() => { setOpen((o) => !o); setDone(""); setConfirm(""); }}>{open ? "Close" : "Open"}</button>
       </div>
@@ -2717,7 +2730,7 @@ function ManagerOps({ ctx, branch, onPrint, isAdmin }) {
   const groups = []; { let last = null; for (const o of all) { const lbl = dayLabel(o.createdAt); if (lbl !== last) { groups.push({ label: lbl, items: [] }); last = lbl; } groups[groups.length - 1].items.push(o); } }
   return (
     <>
-      {isAdmin && !ctx.wentLive && <GoLivePanel ctx={ctx} />}
+      {isAdmin && <GoLivePanel ctx={ctx} />}
       <div className="hz-mkpis">
         <Kpi icon={ShoppingBag} label="Orders" val={all.length} c="#FF6B2C" />
         <Kpi icon={Clock} label="Active Now" val={active.length} c="#FFB22C" />
@@ -3940,8 +3953,10 @@ const CSS = `
 .hz-fcard-p{font-family:var(--fm);font-weight:700;font-size:15px;color:var(--ember);}
 .hz-addbtn2{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;color:#fff;background:linear-gradient(135deg,var(--ember),var(--saffron));box-shadow:0 4px 12px -4px var(--ember);transition:transform .18s;}
 .hz-addbtn2:hover{transform:scale(1.08) rotate(90deg);}.hz-addbtn2:active{transform:scale(.95);}
-.hz-floatcart{position:sticky;bottom:16px;width:100%;display:flex;align-items:center;gap:10px;justify-content:center;padding:14px;border-radius:13px;font-size:13.5px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--ember),var(--saffron));box-shadow:0 14px 36px -12px var(--ember);margin-top:6px;transition:transform .12s;}
+.hz-floatcart{position:fixed;left:16px;right:16px;bottom:16px;z-index:60;width:auto;display:flex;align-items:center;gap:10px;justify-content:center;padding:14px;border-radius:13px;font-size:13.5px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--ember),var(--saffron));box-shadow:0 14px 36px -12px var(--ember);margin-top:6px;transition:transform .12s;}
 .hz-floatcart:active{transform:scale(.99);}
+.hz-floatcart.wide:active{transform:translateX(-50%) scale(.99);}
+.hz-menuwrap,.hz-menu-list,.hz-oflow{padding-bottom:96px;}
 .hz-floatcart span{background:rgba(255,255,255,.22);padding:3px 9px;border-radius:99px;}.hz-floatcart b{font-family:var(--fm);}
 .hz-cartcount{display:inline-flex;align-items:center;gap:5px;}
 
@@ -4295,7 +4310,7 @@ const CSS = `
 .hz-omenu-head{margin-bottom:14px;}
 .hz-omenu-head h2{font-size:24px;font-weight:800;}
 .hz-omenu-head span{font-size:12.5px;color:var(--muted);}
-.hz-floatcart.wide{max-width:760px;margin-left:auto;margin-right:auto;}
+.hz-floatcart.wide{max-width:760px;left:50%;right:auto;transform:translateX(-50%);width:calc(100% - 32px);margin:0;}
 
 .hz-emptybox{display:flex;align-items:center;gap:8px;justify-content:center;color:var(--muted);font-size:12.5px;padding:24px 14px;text-align:center;}
 .hz-toasts{position:fixed;bottom:18px;right:18px;z-index:60;display:flex;flex-direction:column;gap:9px;max-width:330px;}
@@ -4402,11 +4417,12 @@ a.hz-hbranch-addr:hover{color:var(--ember);}
 .hz-hband-in .hz-cta{position:relative;background:#1a1410;color:#fff;}
 .hz-hfoot{max-width:1100px;margin:46px auto 0;padding:26px 20px 30px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:20px;}
 .hz-hfoot-top{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;}
+.hz-hfoot a{text-decoration:none;color:var(--text);}
 .hz-foot-call{display:inline-flex;align-items:center;gap:8px;font-size:13.5px;font-weight:700;color:var(--text);padding:9px 15px;border-radius:99px;background:color-mix(in srgb,var(--ember) 10%,transparent);border:1px solid color-mix(in srgb,var(--ember) 30%,transparent);transition:.16s;}
 .hz-foot-call:hover{background:color-mix(in srgb,var(--ember) 16%,transparent);border-color:var(--ember);}
 .hz-foot-call svg{color:var(--ember);}
 .hz-foot-branches{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
-.hz-foot-loc{display:flex;align-items:flex-start;gap:11px;padding:14px 16px;border-radius:14px;background:var(--surface);border:1px solid var(--border);transition:.16s;}
+.hz-foot-loc{display:flex;align-items:flex-start;gap:11px;padding:14px 16px;border-radius:14px;background:var(--surface);border:1px solid var(--border);transition:.16s;color:var(--text);text-decoration:none;}
 .hz-foot-loc:hover{border-color:var(--ember);transform:translateY(-2px);box-shadow:0 10px 24px -14px var(--ember);}
 .hz-foot-loc-ic{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;color:var(--ember);background:color-mix(in srgb,var(--ember) 12%,transparent);flex-shrink:0;}
 .hz-foot-loc-txt{display:flex;flex-direction:column;gap:2px;min-width:0;}
